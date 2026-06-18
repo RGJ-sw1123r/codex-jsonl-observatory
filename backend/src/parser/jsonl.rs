@@ -803,9 +803,10 @@ fn string_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{fs, io::Cursor};
 
     use super::*;
+    use crate::domain::ChatEntryFilter;
 
     fn event_user_message_line(message: &str) -> String {
         serde_json::json!({
@@ -891,6 +892,18 @@ mod tests {
             "payload": payload
         })
         .to_string()
+    }
+
+    fn temp_file_path(name: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after Unix epoch")
+            .as_nanos();
+
+        std::env::temp_dir().join(format!(
+            "codex-jsonl-observatory-{name}-{}-{unique}.jsonl",
+            std::process::id(),
+        ))
     }
 
     #[test]
@@ -1332,6 +1345,300 @@ mod tests {
         assert_eq!(parsed.ignored_lines, 1);
         assert_eq!(parsed.parsed_candidates, 0);
         assert!(parsed.entries.is_empty());
+    }
+
+    #[test]
+    fn realistic_inline_fixture_verifies_parser_output_contract_before_api() {
+        let parsed = parse_str(
+            &[
+                event_user_message_line(
+                    "# AGENTS.md instructions\n<INSTRUCTIONS>sanitized</INSTRUCTIONS>",
+                ),
+                r#"{"type":"event_msg","payload":{"type":"user_message","id":"user_1","message":"Please inspect this parser."}}"#.to_owned(),
+                r#"{"type":"response_item","payload":{"type":"message","id":"user_1","role":"user","content":"Please inspect this parser."}}"#.to_owned(),
+                event_agent_message_line("I will inspect it."),
+                response_message_line("assistant", "I will inspect it."),
+                r#"{"type":"session_meta","payload":{"id":"session_1","model_provider":"openai","cli_version":"1.0.0"}}"#.to_owned(),
+                response_item_line(
+                    "function_call",
+                    serde_json::json!({
+                        "call_id": "call_1",
+                        "name": "read_file",
+                        "arguments": "{\"path\":\"sanitized.jsonl\"}"
+                    }),
+                ),
+                event_msg_line(
+                    "exec_command_end",
+                    serde_json::json!({
+                        "call_id": "call_2",
+                        "command": "cargo test",
+                        "exit_code": 0,
+                        "stdout": "tests ok"
+                    }),
+                ),
+                response_item_line(
+                    "function_call_output",
+                    serde_json::json!({
+                        "call_id": "call_2",
+                        "output": "tests ok with details"
+                    }),
+                ),
+                r#"{"type":"assistant_note","text":"Fallback Codex note"}"#.to_owned(),
+                r#"{"type":"unknown","output":[{"type":"command_output","output":"Fallback command output"}]}"#.to_owned(),
+                r#"{"type":"event_msg","payload":{"type":"unknown","message":"ignored"}}"#.to_owned(),
+                r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":"ignored"}}"#.to_owned(),
+                "not json".to_owned(),
+                String::new(),
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(parsed.parsed_candidates, 11);
+        assert_eq!(parsed.entries.len(), 8);
+        assert_eq!(parsed.ignored_lines, 2);
+        assert_eq!(parsed.malformed_lines, 1);
+        assert_eq!(parsed.observed_event_counts["event_msg/user_message"], 2);
+        assert_eq!(parsed.observed_event_counts["response_item/message"], 3);
+        assert_eq!(parsed.observed_event_counts["session_meta"], 1);
+        assert_eq!(
+            parsed.observed_event_counts["response_item/function_call"],
+            1
+        );
+        assert_eq!(
+            parsed.observed_event_counts["event_msg/exec_command_end"],
+            1
+        );
+        assert_eq!(
+            parsed.observed_event_counts["response_item/function_call_output"],
+            1
+        );
+        assert_eq!(parsed.observed_event_counts["assistant_note"], 1);
+        assert_eq!(parsed.observed_event_counts["unknown"], 1);
+        assert_eq!(parsed.observed_event_counts["event_msg/unknown"], 1);
+
+        assert_eq!(
+            parsed.entries,
+            vec![
+                RenderedEntry {
+                    kind: RenderedEntryKind::Context,
+                    content: "AGENTS.md project instructions loaded".to_owned()
+                },
+                RenderedEntry {
+                    kind: RenderedEntryKind::You,
+                    content: "Please inspect this parser.".to_owned()
+                },
+                RenderedEntry {
+                    kind: RenderedEntryKind::Codex,
+                    content: "I will inspect it.".to_owned()
+                },
+                RenderedEntry {
+                    kind: RenderedEntryKind::System,
+                    content: "Session: session_1\nModel provider: openai\nCLI version: 1.0.0"
+                        .to_owned()
+                },
+                RenderedEntry {
+                    kind: RenderedEntryKind::ToolCall,
+                    content: "Function call: read_file\n{\"path\":\"sanitized.jsonl\"}".to_owned()
+                },
+                RenderedEntry {
+                    kind: RenderedEntryKind::ToolResult,
+                    content: "tests ok with details".to_owned()
+                },
+                RenderedEntry {
+                    kind: RenderedEntryKind::Codex,
+                    content: "Fallback Codex note".to_owned()
+                },
+                RenderedEntry {
+                    kind: RenderedEntryKind::ToolResult,
+                    content: "Fallback command output".to_owned()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_file_empty_file_returns_safe_empty_result() {
+        let path = temp_file_path("empty");
+        fs::write(&path, "").expect("empty fixture file is written");
+
+        let parsed = parse_file(&path).expect("empty file parses safely");
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(parsed, ParsedChatLog::empty());
+    }
+
+    #[test]
+    fn parse_file_non_file_returns_safe_empty_result() {
+        let path = temp_file_path("missing");
+        let _ = fs::remove_file(&path);
+
+        let parsed = parse_file(&path).expect("missing file parses safely");
+
+        assert_eq!(parsed, ParsedChatLog::empty());
+    }
+
+    #[test]
+    fn contract_malformed_lines_do_not_affect_ignored_or_observed_counts() {
+        let parsed = parse_str(
+            &[
+                "not json".to_owned(),
+                event_user_message_line("still parsed"),
+                "{".to_owned(),
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(parsed.malformed_lines, 2);
+        assert_eq!(parsed.ignored_lines, 0);
+        assert_eq!(parsed.parsed_candidates, 1);
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(parsed.observed_event_counts["event_msg/user_message"], 1);
+        assert_eq!(parsed.observed_event_counts.len(), 1);
+    }
+
+    #[test]
+    fn contract_ignored_valid_json_lines_count_once_per_line() {
+        let parsed = parse_str(
+            &[
+                r#"{"type":"event_msg","payload":{"type":"unknown","message":"ignored"}}"#.to_owned(),
+                r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":"ignored"}}"#.to_owned(),
+                r#"{"type":"unrecognized"}"#.to_owned(),
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(parsed.malformed_lines, 0);
+        assert_eq!(parsed.ignored_lines, 3);
+        assert_eq!(parsed.parsed_candidates, 0);
+        assert!(parsed.entries.is_empty());
+        assert_eq!(parsed.observed_event_counts["event_msg/unknown"], 1);
+        assert_eq!(parsed.observed_event_counts["response_item/message"], 1);
+        assert_eq!(parsed.observed_event_counts["unrecognized"], 1);
+    }
+
+    #[test]
+    fn identical_codex_messages_with_different_stable_ids_are_not_collapsed() {
+        let parsed = parse_str(
+            &[
+                r#"{"type":"response_item","payload":{"type":"message","id":"codex_a","role":"assistant","content":"Repeat Codex"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"codex_b","role":"assistant","content":"Repeat Codex"}}"#,
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(parsed.parsed_candidates, 2);
+        assert_eq!(
+            parsed.entries,
+            vec![
+                RenderedEntry {
+                    kind: RenderedEntryKind::Codex,
+                    content: "Repeat Codex".to_owned()
+                },
+                RenderedEntry {
+                    kind: RenderedEntryKind::Codex,
+                    content: "Repeat Codex".to_owned()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn user_and_codex_blocks_remain_separate_for_realistic_envelope_shapes() {
+        let parsed = parse_str(
+            &[
+                event_user_message_line("What changed?"),
+                response_message_line("assistant", "The parser changed."),
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(
+            parsed.entries,
+            vec![
+                RenderedEntry {
+                    kind: RenderedEntryKind::You,
+                    content: "What changed?".to_owned()
+                },
+                RenderedEntry {
+                    kind: RenderedEntryKind::Codex,
+                    content: "The parser changed.".to_owned()
+                }
+            ]
+        );
+        assert_eq!(parsed.transcript_blocks()[0].label, "[YOU]");
+        assert_eq!(parsed.transcript_blocks()[1].label, "[CODEX]");
+    }
+
+    #[test]
+    fn filtering_over_parsed_output_preserves_contract_counters() {
+        let parsed = parse_str(
+            &[
+                event_user_message_line("show me"),
+                response_message_line("assistant", "visible"),
+                response_item_line(
+                    "function_call",
+                    serde_json::json!({"name": "read_file", "arguments": "{}"}),
+                ),
+                response_item_line(
+                    "function_call_output",
+                    serde_json::json!({"call_id": "call_1", "output": "hidden"}),
+                ),
+                r#"{"type":"session_meta","payload":{"id":"session_1"}}"#.to_owned(),
+            ]
+            .join("\n"),
+        );
+
+        let filtered = parsed.filtered(&ChatEntryFilter {
+            show_you: false,
+            show_tool_result: false,
+            show_meta: false,
+            ..ChatEntryFilter::all()
+        });
+
+        assert_eq!(filtered.parsed_candidates, parsed.parsed_candidates);
+        assert_eq!(filtered.ignored_lines, parsed.ignored_lines);
+        assert_eq!(filtered.malformed_lines, parsed.malformed_lines);
+        assert_eq!(filtered.observed_event_counts, parsed.observed_event_counts);
+        assert_eq!(
+            filtered.entries,
+            vec![
+                RenderedEntry {
+                    kind: RenderedEntryKind::Codex,
+                    content: "visible".to_owned()
+                },
+                RenderedEntry {
+                    kind: RenderedEntryKind::ToolCall,
+                    content: "Function call: read_file\n{}".to_owned()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn transcript_blocks_over_parsed_output_preserve_entry_contract() {
+        let parsed = parse_str(
+            &[
+                event_user_message_line("hello"),
+                response_message_line("assistant", "hi"),
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(parsed.transcript_blocks().len(), 2);
+        assert_eq!(
+            parsed.transcript_blocks()[0].entry_type,
+            RenderedEntryKind::You
+        );
+        assert_eq!(parsed.transcript_blocks()[0].label, "[YOU]");
+        assert_eq!(parsed.transcript_blocks()[0].title, "[YOU]");
+        assert_eq!(parsed.transcript_blocks()[0].content, "hello");
+        assert_eq!(
+            parsed.transcript_blocks()[1].entry_type,
+            RenderedEntryKind::Codex
+        );
+        assert_eq!(parsed.transcript_blocks()[1].label, "[CODEX]");
+        assert_eq!(parsed.transcript_blocks()[1].title, "[CODEX]");
+        assert_eq!(parsed.transcript_blocks()[1].content, "hi");
     }
 
     #[test]
