@@ -105,6 +105,16 @@ fn extract_entry(value: &Value) -> Option<RenderedEntry> {
             }
         }
         ("response_item", Some("message")) => extract_response_message(payload),
+        ("response_item", Some("function_call")) => extract_tool_call(payload, "Function call"),
+        ("response_item", Some("custom_tool_call")) => {
+            extract_tool_call(payload, "Custom tool call")
+        }
+        ("response_item", Some("function_call_output")) => {
+            extract_tool_result(payload, "Function call output")
+        }
+        ("response_item", Some("custom_tool_call_output")) => {
+            extract_tool_result(payload, "Custom tool call output")
+        }
         _ => None,
     }
 }
@@ -128,6 +138,58 @@ fn extract_response_message(payload: &Value) -> Option<RenderedEntry> {
     };
 
     Some(RenderedEntry { kind, content })
+}
+
+fn extract_tool_call(payload: &Value, label: &str) -> Option<RenderedEntry> {
+    let name = string_field(payload, "name")
+        .or_else(|| string_field(payload, "call_id"))
+        .or_else(|| string_field(payload, "id"))?;
+
+    let mut content = format!("{label}: {name}");
+    if let Some(arguments) = extract_tool_arguments(payload) {
+        content.push('\n');
+        content.push_str(&arguments);
+    }
+
+    Some(RenderedEntry {
+        kind: RenderedEntryKind::ToolCall,
+        content,
+    })
+}
+
+fn extract_tool_result(payload: &Value, label: &str) -> Option<RenderedEntry> {
+    let content = extract_text(payload)
+        .or_else(|| string_field(payload, "call_id").map(|call_id| format!("{label}: {call_id}")))?
+        .trim()
+        .to_owned();
+
+    if content.is_empty() {
+        None
+    } else {
+        Some(RenderedEntry {
+            kind: RenderedEntryKind::ToolResult,
+            content,
+        })
+    }
+}
+
+fn extract_tool_arguments(payload: &Value) -> Option<String> {
+    if let Some(arguments) = payload.get("arguments") {
+        return match arguments {
+            Value::String(arguments) => {
+                let arguments = arguments.trim();
+                (!arguments.is_empty()).then(|| arguments.to_owned())
+            }
+            Value::Object(_) | Value::Array(_) => Some(arguments.to_string()),
+            _ => None,
+        };
+    }
+
+    string_field(payload, "input")
+        .map(str::trim)
+        .filter(|input| !input.is_empty())
+        .map(str::to_owned)
+        .or_else(|| extract_text(payload))
 }
 
 fn classify_user_message(content: &str) -> RenderedEntry {
@@ -271,6 +333,26 @@ mod tests {
         .to_string()
     }
 
+    fn response_item_line(payload_type: &str, fields: serde_json::Value) -> String {
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "type".to_owned(),
+            serde_json::Value::String(payload_type.to_owned()),
+        );
+
+        let serde_json::Value::Object(fields) = fields else {
+            panic!("test fields must be a JSON object");
+        };
+
+        payload.extend(fields);
+
+        serde_json::json!({
+            "type": "response_item",
+            "payload": payload
+        })
+        .to_string()
+    }
+
     #[test]
     fn parses_event_msg_user_message_from_string() {
         let parsed = parse_str(
@@ -364,6 +446,121 @@ mod tests {
         let parsed = parse_str(&response_message_line("developer", "Developer instruction"));
 
         assert_eq!(parsed.ignored_lines, 1);
+        assert_eq!(parsed.parsed_candidates, 0);
+        assert!(parsed.entries.is_empty());
+    }
+
+    #[test]
+    fn response_item_function_call_is_tool_call() {
+        let parsed = parse_str(&response_item_line(
+            "function_call",
+            serde_json::json!({
+                "name": "read_file",
+                "arguments": "{\"path\":\"README.md\"}"
+            }),
+        ));
+
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(parsed.entries[0].kind, RenderedEntryKind::ToolCall);
+        assert_eq!(
+            parsed.entries[0].content,
+            "Function call: read_file\n{\"path\":\"README.md\"}"
+        );
+    }
+
+    #[test]
+    fn response_item_custom_tool_call_is_tool_call() {
+        let parsed = parse_str(&response_item_line(
+            "custom_tool_call",
+            serde_json::json!({
+                "name": "shell_command",
+                "input": "cargo test"
+            }),
+        ));
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::ToolCall,
+                content: "Custom tool call: shell_command\ncargo test".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn response_item_function_call_output_is_tool_result() {
+        let parsed = parse_str(&response_item_line(
+            "function_call_output",
+            serde_json::json!({
+                "call_id": "call_1",
+                "output": "file contents"
+            }),
+        ));
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::ToolResult,
+                content: "file contents".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn response_item_custom_tool_call_output_is_tool_result() {
+        let parsed = parse_str(&response_item_line(
+            "custom_tool_call_output",
+            serde_json::json!({
+                "call_id": "call_2",
+                "content": [{"text": "command output"}]
+            }),
+        ));
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::ToolResult,
+                content: "command output".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn observed_event_counts_include_tool_lines() {
+        let parsed = parse_str(
+            &[
+                response_item_line("function_call", serde_json::json!({"name": "read_file"})),
+                response_item_line(
+                    "custom_tool_call_output",
+                    serde_json::json!({"output": "done"}),
+                ),
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(
+            parsed.observed_event_counts["response_item/function_call"],
+            1
+        );
+        assert_eq!(
+            parsed.observed_event_counts["response_item/custom_tool_call_output"],
+            1
+        );
+    }
+
+    #[test]
+    fn incomplete_or_unsupported_tool_payloads_are_ignored_safely() {
+        let parsed = parse_str(
+            &[
+                response_item_line("function_call", serde_json::json!({"arguments": "{}"})),
+                response_item_line("custom_tool_call_output", serde_json::json!({})),
+                response_item_line("unsupported_tool", serde_json::json!({"name": "noop"})),
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(parsed.malformed_lines, 0);
+        assert_eq!(parsed.ignored_lines, 3);
         assert_eq!(parsed.parsed_candidates, 0);
         assert!(parsed.entries.is_empty());
     }
