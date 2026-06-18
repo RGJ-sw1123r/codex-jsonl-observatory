@@ -48,9 +48,11 @@ fn parse_lossy_lines(input: &str) -> ParsedChatLog {
 
         increment_observed_event_count(&mut observed_event_counts, &value);
 
-        match extract_entry(&value) {
-            Some(entry) => entries.push(entry),
-            None => ignored_lines += 1,
+        let extracted = extract_entries(&value);
+        if extracted.is_empty() {
+            ignored_lines += 1;
+        } else {
+            entries.extend(extracted);
         }
     }
 
@@ -79,35 +81,35 @@ fn increment_observed_event_count(counts: &mut IndexMap<String, usize>, value: &
     *counts.entry(key).or_insert(0) += 1;
 }
 
-fn extract_entry(value: &Value) -> Option<RenderedEntry> {
+fn extract_entries(value: &Value) -> Vec<RenderedEntry> {
+    match extract_focused_entry(value) {
+        Some(Some(entry)) => vec![entry],
+        Some(None) => Vec::new(),
+        None => extract_fallback_entries(value),
+    }
+}
+
+fn extract_focused_entry(value: &Value) -> Option<Option<RenderedEntry>> {
     let top_type = string_field(value, "type")?;
     if top_type == "session_meta" {
-        return extract_session_meta(value.get("payload").unwrap_or(value));
+        return Some(extract_session_meta(value.get("payload").unwrap_or(value)));
     }
 
     let payload = value.get("payload")?;
     let payload_type = string_field(payload, "type");
 
-    match (top_type, payload_type) {
-        ("event_msg", Some("user_message")) => {
-            let content = string_field(payload, "message")?.trim();
-            if content.is_empty() {
-                None
-            } else {
-                Some(classify_user_message(content))
-            }
-        }
-        ("event_msg", Some("agent_message")) => {
-            let content = string_field(payload, "message")?.trim();
-            if content.is_empty() {
-                None
-            } else {
-                Some(RenderedEntry {
-                    kind: RenderedEntryKind::Codex,
-                    content: content.to_owned(),
-                })
-            }
-        }
+    let entry = match (top_type, payload_type) {
+        ("event_msg", Some("user_message")) => string_field(payload, "message")
+            .map(str::trim)
+            .filter(|content| !content.is_empty())
+            .map(classify_user_message),
+        ("event_msg", Some("agent_message")) => string_field(payload, "message")
+            .map(str::trim)
+            .filter(|content| !content.is_empty())
+            .map(|content| RenderedEntry {
+                kind: RenderedEntryKind::Codex,
+                content: content.to_owned(),
+            }),
         ("event_msg", Some("exec_command_end")) => extract_exec_command_end(payload),
         ("event_msg", Some("patch_apply_end")) => extract_patch_apply_end(payload),
         ("event_msg", Some("task_started")) => {
@@ -127,8 +129,121 @@ fn extract_entry(value: &Value) -> Option<RenderedEntry> {
         ("response_item", Some("custom_tool_call_output")) => {
             extract_tool_result(payload, "Custom tool call output")
         }
-        _ => None,
+        _ => return None,
+    };
+
+    Some(entry)
+}
+
+fn extract_fallback_entries(value: &Value) -> Vec<RenderedEntry> {
+    let mut entries = Vec::new();
+
+    if let Some(entry) = extract_fallback_entry(value) {
+        entries.push(entry);
     }
+
+    for field in ["message", "item", "delta"] {
+        if let Some(entry) = value.get(field).and_then(extract_fallback_entry) {
+            entries.push(entry);
+        }
+    }
+
+    if let Some(output) = value.get("output").and_then(Value::as_array) {
+        entries.extend(output.iter().filter_map(extract_fallback_entry));
+    }
+
+    entries
+}
+
+fn extract_fallback_entry(value: &Value) -> Option<RenderedEntry> {
+    extract_role_based_entry(value).or_else(|| extract_type_based_entry(value))
+}
+
+fn extract_role_based_entry(value: &Value) -> Option<RenderedEntry> {
+    let role = string_field(value, "role")?;
+    let content = extract_text(value)?.trim().to_owned();
+    if content.is_empty() {
+        return None;
+    }
+
+    if role == "user" {
+        return Some(classify_user_message(&content));
+    }
+
+    let kind = match role {
+        "assistant" | "model" => RenderedEntryKind::Codex,
+        "tool" => RenderedEntryKind::ToolResult,
+        "system" => RenderedEntryKind::System,
+        _ => return None,
+    };
+
+    Some(RenderedEntry { kind, content })
+}
+
+fn extract_type_based_entry(value: &Value) -> Option<RenderedEntry> {
+    let type_name = string_field(value, "type")?;
+    let normalized_type = type_name.to_ascii_lowercase();
+    let content = fallback_type_content(value, &normalized_type)?;
+
+    if normalized_type.contains("user") {
+        return Some(classify_user_message(&content));
+    }
+
+    let kind = if normalized_type.contains("assistant")
+        || normalized_type.contains("model")
+        || normalized_type.contains("agent")
+    {
+        RenderedEntryKind::Codex
+    } else if normalized_type.contains("system") || normalized_type.contains("session") {
+        RenderedEntryKind::System
+    } else if is_tool_call_type(&normalized_type) {
+        RenderedEntryKind::ToolCall
+    } else if is_tool_result_type(&normalized_type) {
+        RenderedEntryKind::ToolResult
+    } else {
+        return None;
+    };
+
+    Some(RenderedEntry { kind, content })
+}
+
+fn fallback_type_content(value: &Value, normalized_type: &str) -> Option<String> {
+    if is_tool_call_type(normalized_type) {
+        if let Some(name) = string_field(value, "name")
+            .or_else(|| string_field(value, "call_id"))
+            .or_else(|| string_field(value, "id"))
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            let mut content = format!("Tool call: {name}");
+            if let Some(arguments) = extract_tool_arguments(value) {
+                content.push('\n');
+                content.push_str(&arguments);
+            }
+            return Some(content);
+        }
+    }
+
+    extract_text(value)
+        .map(|content| content.trim().to_owned())
+        .filter(|content| !content.is_empty())
+}
+
+fn is_tool_call_type(normalized_type: &str) -> bool {
+    (normalized_type.contains("tool_call")
+        || normalized_type.contains("function_call")
+        || normalized_type.contains("command"))
+        && !normalized_type.contains("output")
+        && !normalized_type.contains("result")
+        && !normalized_type.contains("end")
+}
+
+fn is_tool_result_type(normalized_type: &str) -> bool {
+    normalized_type.contains("tool_result")
+        || normalized_type.contains("function_result")
+        || normalized_type.contains("command_result")
+        || normalized_type.contains("output")
+        || normalized_type.contains("end")
 }
 
 fn extract_exec_command_end(payload: &Value) -> Option<RenderedEntry> {
@@ -845,6 +960,110 @@ mod tests {
 
         assert_eq!(parsed.malformed_lines, 0);
         assert_eq!(parsed.ignored_lines, 3);
+        assert_eq!(parsed.parsed_candidates, 0);
+        assert!(parsed.entries.is_empty());
+    }
+
+    #[test]
+    fn fallback_extracts_role_based_entry_from_root_object() {
+        let parsed =
+            parse_str(r#"{"role":"user","content":"Please inspect this fallback shape."}"#);
+
+        assert_eq!(parsed.ignored_lines, 0);
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::You,
+                content: "Please inspect this fallback shape.".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn fallback_extracts_role_based_entry_from_nested_message() {
+        let parsed = parse_str(
+            r#"{"type":"unknown","message":{"role":"assistant","content":"Nested assistant text"}}"#,
+        );
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::Codex,
+                content: "Nested assistant text".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn fallback_extracts_type_based_entry_from_nested_item() {
+        let parsed =
+            parse_str(r#"{"type":"unknown","item":{"type":"system_note","text":"System note"}}"#);
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::System,
+                content: "System note".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn fallback_extracts_type_based_tool_call_from_nested_delta() {
+        let parsed = parse_str(
+            r#"{"type":"unknown","delta":{"type":"function_call","name":"read_file","arguments":{"path":"README.md"}}}"#,
+        );
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::ToolCall,
+                content: r#"Tool call: read_file
+{"path":"README.md"}"#
+                    .to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn fallback_extracts_each_object_inside_root_output_array() {
+        let parsed = parse_str(
+            r#"{"type":"unknown","output":[{"type":"assistant_message","text":"Assistant output"},{"type":"command_output","output":"Command output"},{"type":"ignored"}]}"#,
+        );
+
+        assert_eq!(parsed.ignored_lines, 0);
+        assert_eq!(parsed.parsed_candidates, 2);
+        assert_eq!(
+            parsed.entries,
+            vec![
+                RenderedEntry {
+                    kind: RenderedEntryKind::Codex,
+                    content: "Assistant output".to_owned()
+                },
+                RenderedEntry {
+                    kind: RenderedEntryKind::ToolResult,
+                    content: "Command output".to_owned()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn fallback_role_based_developer_entries_remain_ignored() {
+        let parsed = parse_str(r#"{"role":"developer","content":"Developer instruction"}"#);
+
+        assert_eq!(parsed.ignored_lines, 1);
+        assert_eq!(parsed.parsed_candidates, 0);
+        assert!(parsed.entries.is_empty());
+    }
+
+    #[test]
+    fn focused_envelope_empty_payload_does_not_fall_back() {
+        let parsed = parse_str(
+            r#"{"type":"event_msg","payload":{"type":"user_message"},"message":{"role":"assistant","content":"fallback should not render"}}"#,
+        );
+
+        assert_eq!(parsed.ignored_lines, 1);
         assert_eq!(parsed.parsed_candidates, 0);
         assert!(parsed.entries.is_empty());
     }
