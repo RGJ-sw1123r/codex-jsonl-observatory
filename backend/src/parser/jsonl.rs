@@ -93,6 +93,17 @@ fn extract_entry(value: &Value) -> Option<RenderedEntry> {
                 Some(classify_user_message(content))
             }
         }
+        ("event_msg", Some("agent_message")) => {
+            let content = string_field(payload, "message")?.trim();
+            if content.is_empty() {
+                None
+            } else {
+                Some(RenderedEntry {
+                    kind: RenderedEntryKind::Codex,
+                    content: content.to_owned(),
+                })
+            }
+        }
         ("response_item", Some("message")) => extract_response_message(payload),
         _ => None,
     }
@@ -237,6 +248,29 @@ mod tests {
         .to_string()
     }
 
+    fn event_agent_message_line(message: &str) -> String {
+        serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": message
+            }
+        })
+        .to_string()
+    }
+
+    fn response_message_line(role: &str, content: &str) -> String {
+        serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": role,
+                "content": content
+            }
+        })
+        .to_string()
+    }
+
     #[test]
     fn parses_event_msg_user_message_from_string() {
         let parsed = parse_str(
@@ -271,6 +305,67 @@ mod tests {
                 content: "hi from codex".to_owned()
             }]
         );
+    }
+
+    #[test]
+    fn event_msg_agent_message_is_codex() {
+        let parsed = parse_str(&event_agent_message_line("I can help with that."));
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::Codex,
+                content: "I can help with that.".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn response_item_assistant_message_is_codex() {
+        let parsed = parse_str(&response_message_line("assistant", "Assistant response"));
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::Codex,
+                content: "Assistant response".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn response_item_model_message_is_codex() {
+        let parsed = parse_str(&response_message_line("model", "Model response"));
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::Codex,
+                content: "Model response".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn response_item_system_message_is_system() {
+        let parsed = parse_str(&response_message_line("system", "System message"));
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::System,
+                content: "System message".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn developer_messages_remain_ignored() {
+        let parsed = parse_str(&response_message_line("developer", "Developer instruction"));
+
+        assert_eq!(parsed.ignored_lines, 1);
+        assert_eq!(parsed.parsed_candidates, 0);
+        assert!(parsed.entries.is_empty());
     }
 
     #[test]
@@ -392,11 +487,18 @@ mod tests {
 
     #[test]
     fn preserves_unicode_message_content() {
-        let parsed = parse_str(
-            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":"안녕하세요"}}"#,
-        );
+        let parsed = parse_str(&response_message_line(
+            "assistant",
+            "\u{c548}\u{b155}\u{d558}\u{c138}\u{c694}",
+        ));
 
-        assert_eq!(parsed.entries[0].content, "안녕하세요");
+        assert_eq!(
+            parsed.entries[0],
+            RenderedEntry {
+                kind: RenderedEntryKind::Codex,
+                content: "\u{c548}\u{b155}\u{d558}\u{c138}\u{c694}".to_owned()
+            }
+        );
     }
 
     #[test]
