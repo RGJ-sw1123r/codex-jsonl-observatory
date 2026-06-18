@@ -105,8 +105,11 @@ fn extract_response_message(payload: &Value) -> Option<RenderedEntry> {
         return None;
     }
 
+    if role == "user" {
+        return Some(classify_user_message(&content));
+    }
+
     let kind = match role {
-        "user" => classify_user_message(&content).kind,
         "assistant" | "model" => RenderedEntryKind::Codex,
         "tool" => RenderedEntryKind::ToolResult,
         "system" => RenderedEntryKind::System,
@@ -118,16 +121,7 @@ fn extract_response_message(payload: &Value) -> Option<RenderedEntry> {
 
 fn classify_user_message(content: &str) -> RenderedEntry {
     let trimmed = content.trim();
-    let kind = if trimmed.contains("# AGENTS.md") || trimmed.contains("<INSTRUCTIONS>") {
-        RenderedEntryKind::Context
-    } else if trimmed.contains("<environment_context>")
-        || trimmed.contains("<user_instructions>")
-        || trimmed.contains("<task>")
-    {
-        RenderedEntryKind::Task
-    } else {
-        RenderedEntryKind::You
-    };
+    let kind = classify_user_message_kind(trimmed);
 
     RenderedEntry {
         kind,
@@ -137,6 +131,34 @@ fn classify_user_message(content: &str) -> RenderedEntry {
             _ => trimmed.to_owned(),
         },
     }
+}
+
+fn classify_user_message_kind(content: &str) -> RenderedEntryKind {
+    if is_agents_instructions(content) {
+        RenderedEntryKind::Context
+    } else if is_structured_task_or_prompt(content) {
+        RenderedEntryKind::Task
+    } else {
+        RenderedEntryKind::You
+    }
+}
+
+fn is_agents_instructions(content: &str) -> bool {
+    content.contains("# AGENTS.md")
+        || content.contains("AGENTS.md instructions")
+        || content.contains("<INSTRUCTIONS>")
+}
+
+fn is_structured_task_or_prompt(content: &str) -> bool {
+    [
+        "<environment_context>",
+        "<user_instructions>",
+        "<developer_context>",
+        "<task>",
+        "<prompt>",
+    ]
+    .iter()
+    .any(|marker| content.contains(marker))
 }
 
 fn extract_text(value: &Value) -> Option<String> {
@@ -191,6 +213,29 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+
+    fn event_user_message_line(message: &str) -> String {
+        serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": message
+            }
+        })
+        .to_string()
+    }
+
+    fn response_user_message_line(content: &str) -> String {
+        serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": content
+            }
+        })
+        .to_string()
+    }
 
     #[test]
     fn parses_event_msg_user_message_from_string() {
@@ -278,9 +323,9 @@ mod tests {
 
     #[test]
     fn classifies_agents_instructions_as_context_summary() {
-        let parsed = parse_str(
-            r##"{"type":"event_msg","payload":{"type":"user_message","message":"# AGENTS.md instructions\n<INSTRUCTIONS>observe</INSTRUCTIONS>"}}"##,
-        );
+        let parsed = parse_str(&event_user_message_line(
+            "# AGENTS.md instructions\n<INSTRUCTIONS>observe</INSTRUCTIONS>",
+        ));
 
         assert_eq!(
             parsed.entries,
@@ -293,15 +338,54 @@ mod tests {
 
     #[test]
     fn classifies_structured_task_body_as_task_summary() {
-        let parsed = parse_str(
-            r#"{"type":"event_msg","payload":{"type":"user_message","message":"<environment_context>local</environment_context>\nBuild this"}}"#,
-        );
+        let parsed = parse_str(&response_user_message_line(
+            "<environment_context>local</environment_context>\nBuild this",
+        ));
 
         assert_eq!(
             parsed.entries,
             vec![RenderedEntry {
                 kind: RenderedEntryKind::Task,
                 content: "Task or prompt instructions loaded".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn classifies_ordinary_human_prompt_as_you() {
+        let parsed = parse_str(&event_user_message_line(
+            "Can you explain how this parser handles malformed JSONL?",
+        ));
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::You,
+                content: "Can you explain how this parser handles malformed JSONL?".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn long_ordinary_human_prompt_stays_you() {
+        let prompt = "Please review this parser behavior carefully. ".repeat(80);
+        let parsed = parse_str(&response_user_message_line(&prompt));
+
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(parsed.entries[0].kind, RenderedEntryKind::You);
+        assert_eq!(parsed.entries[0].content, prompt.trim());
+    }
+
+    #[test]
+    fn korean_utf8_user_message_stays_intact() {
+        let message = "\u{c548}\u{b155}\u{d558}\u{c138}\u{c694}. JSONL \u{d30c}\u{c11c}\u{b97c} \u{d655}\u{c778}\u{d574} \u{c8fc}\u{c138}\u{c694}.";
+        let parsed = parse_str(&event_user_message_line(message));
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::You,
+                content: message.to_owned()
             }]
         );
     }
