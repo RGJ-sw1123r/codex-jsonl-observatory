@@ -456,12 +456,17 @@ Out of scope for the first milestone:
 - Real private logs or committed sample data.
 - Dependency/build/release changes beyond parser dependencies explicitly declared in the implementation task.
 
+Related documentation-only checklist:
+
+- `docs/source-app-parity-checklist.md` records broader Kotlin/Swing source-app parity requirements for the Rust/Svelte port. It includes export and Copy Resume Command behavior, but is intentionally not part of the parser parity implementation milestone.
+
 ## 13. Verification Plan
 
 Documentation-only verification for this plan:
 
 - Confirm `docs/parser-port-plan.md` exists.
 - Confirm it includes the required thirteen sections.
+- Confirm `docs/source-app-parity-checklist.md` exists when source-app parity planning is needed.
 - Confirm no source files were changed.
 
 Future implementation verification:
