@@ -7,6 +7,46 @@ use serde_json::Value;
 
 use crate::domain::{ParsedChatLog, RenderedEntry, RenderedEntryKind};
 
+#[derive(Clone, Debug)]
+struct ParsedCandidate {
+    entry: RenderedEntry,
+    stable_key: Option<String>,
+    normalized_text: String,
+    source: CandidateSource,
+    timestamp: Option<String>,
+    original_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CandidateSource {
+    ResponseMessage,
+    ResponseToolResult,
+    EventToolResult,
+    ResponseToolCall,
+    EventUserMessage,
+    EventAgentMessage,
+    EventSystem,
+    Fallback,
+}
+
+impl CandidateSource {
+    fn priority(self) -> u8 {
+        match self {
+            Self::ResponseMessage | Self::ResponseToolResult => 4,
+            Self::EventToolResult | Self::ResponseToolCall | Self::EventUserMessage => 3,
+            Self::EventAgentMessage | Self::EventSystem => 2,
+            Self::Fallback => 1,
+        }
+    }
+}
+
+struct CandidateSeed {
+    entry: RenderedEntry,
+    source: CandidateSource,
+    stable_id: Option<String>,
+    timestamp: Option<String>,
+}
+
 pub fn parse_str(input: &str) -> ParsedChatLog {
     parse_lossy_lines(input)
 }
@@ -27,10 +67,11 @@ pub fn parse_file(path: impl AsRef<Path>) -> io::Result<ParsedChatLog> {
 }
 
 fn parse_lossy_lines(input: &str) -> ParsedChatLog {
-    let mut entries = Vec::new();
+    let mut candidates = Vec::new();
     let mut ignored_lines = 0;
     let mut malformed_lines = 0;
     let mut observed_event_counts = IndexMap::new();
+    let mut next_candidate_index = 0;
 
     for raw_line in input.lines() {
         let line = raw_line.trim();
@@ -48,16 +89,26 @@ fn parse_lossy_lines(input: &str) -> ParsedChatLog {
 
         increment_observed_event_count(&mut observed_event_counts, &value);
 
-        let extracted = extract_entries(&value);
+        let extracted = extract_candidate_seeds(&value);
         if extracted.is_empty() {
             ignored_lines += 1;
         } else {
-            entries.extend(extracted);
+            candidates.extend(extracted.into_iter().map(|seed| {
+                let candidate = parsed_candidate(seed, next_candidate_index);
+                next_candidate_index += 1;
+                candidate
+            }));
         }
     }
 
+    let parsed_candidates = candidates.len();
+    let entries = dedupe_candidates(candidates)
+        .into_iter()
+        .map(|candidate| candidate.entry)
+        .collect();
+
     ParsedChatLog {
-        parsed_candidates: entries.len(),
+        parsed_candidates,
         entries,
         ignored_lines,
         malformed_lines,
@@ -81,22 +132,58 @@ fn increment_observed_event_count(counts: &mut IndexMap<String, usize>, value: &
     *counts.entry(key).or_insert(0) += 1;
 }
 
-fn extract_entries(value: &Value) -> Vec<RenderedEntry> {
-    match extract_focused_entry(value) {
-        Some(Some(entry)) => vec![entry],
-        Some(None) => Vec::new(),
-        None => extract_fallback_entries(value),
+fn parsed_candidate(seed: CandidateSeed, original_index: usize) -> ParsedCandidate {
+    ParsedCandidate {
+        normalized_text: normalize_text(&seed.entry.content),
+        stable_key: seed
+            .stable_id
+            .map(|stable_id| format!("{}:{stable_id}", rendered_kind_key(seed.entry.kind))),
+        entry: seed.entry,
+        source: seed.source,
+        timestamp: seed.timestamp,
+        original_index,
     }
 }
 
-fn extract_focused_entry(value: &Value) -> Option<Option<RenderedEntry>> {
+fn extract_candidate_seeds(value: &Value) -> Vec<CandidateSeed> {
+    match extract_focused_seed(value) {
+        Some(Some(entry)) => vec![entry],
+        Some(None) => Vec::new(),
+        None => extract_fallback_seeds(value),
+    }
+}
+
+fn extract_focused_seed(value: &Value) -> Option<Option<CandidateSeed>> {
     let top_type = string_field(value, "type")?;
     if top_type == "session_meta" {
-        return Some(extract_session_meta(value.get("payload").unwrap_or(value)));
+        let payload = value.get("payload").unwrap_or(value);
+        return Some(extract_session_meta(payload).map(|entry| CandidateSeed {
+            entry,
+            source: CandidateSource::EventSystem,
+            stable_id: stable_id(payload),
+            timestamp: timestamp(value).or_else(|| timestamp(payload)),
+        }));
     }
 
     let payload = value.get("payload")?;
     let payload_type = string_field(payload, "type");
+
+    let source = match (top_type, payload_type) {
+        ("event_msg", Some("user_message")) => CandidateSource::EventUserMessage,
+        ("event_msg", Some("agent_message")) => CandidateSource::EventAgentMessage,
+        ("event_msg", Some("exec_command_end" | "patch_apply_end")) => {
+            CandidateSource::EventToolResult
+        }
+        ("event_msg", Some("task_started" | "task_complete")) => CandidateSource::EventSystem,
+        ("response_item", Some("message")) => CandidateSource::ResponseMessage,
+        ("response_item", Some("function_call" | "custom_tool_call")) => {
+            CandidateSource::ResponseToolCall
+        }
+        ("response_item", Some("function_call_output" | "custom_tool_call_output")) => {
+            CandidateSource::ResponseToolResult
+        }
+        _ => return None,
+    };
 
     let entry = match (top_type, payload_type) {
         ("event_msg", Some("user_message")) => string_field(payload, "message")
@@ -129,34 +216,46 @@ fn extract_focused_entry(value: &Value) -> Option<Option<RenderedEntry>> {
         ("response_item", Some("custom_tool_call_output")) => {
             extract_tool_result(payload, "Custom tool call output")
         }
-        _ => return None,
+        _ => unreachable!("focused source already matched supported envelope types"),
     };
 
-    Some(entry)
+    Some(entry.map(|entry| CandidateSeed {
+        entry,
+        source,
+        stable_id: focused_stable_id(payload_type, payload),
+        timestamp: timestamp(value).or_else(|| timestamp(payload)),
+    }))
 }
 
-fn extract_fallback_entries(value: &Value) -> Vec<RenderedEntry> {
-    let mut entries = Vec::new();
+fn extract_fallback_seeds(value: &Value) -> Vec<CandidateSeed> {
+    let mut seeds = Vec::new();
 
-    if let Some(entry) = extract_fallback_entry(value) {
-        entries.push(entry);
+    if let Some(seed) = extract_fallback_seed(value) {
+        seeds.push(seed);
     }
 
     for field in ["message", "item", "delta"] {
-        if let Some(entry) = value.get(field).and_then(extract_fallback_entry) {
-            entries.push(entry);
+        if let Some(seed) = value.get(field).and_then(extract_fallback_seed) {
+            seeds.push(seed);
         }
     }
 
     if let Some(output) = value.get("output").and_then(Value::as_array) {
-        entries.extend(output.iter().filter_map(extract_fallback_entry));
+        seeds.extend(output.iter().filter_map(extract_fallback_seed));
     }
 
-    entries
+    seeds
 }
 
-fn extract_fallback_entry(value: &Value) -> Option<RenderedEntry> {
-    extract_role_based_entry(value).or_else(|| extract_type_based_entry(value))
+fn extract_fallback_seed(value: &Value) -> Option<CandidateSeed> {
+    extract_role_based_entry(value)
+        .or_else(|| extract_type_based_entry(value))
+        .map(|entry| CandidateSeed {
+            entry,
+            source: CandidateSource::Fallback,
+            stable_id: stable_id(value),
+            timestamp: timestamp(value),
+        })
 }
 
 fn extract_role_based_entry(value: &Value) -> Option<RenderedEntry> {
@@ -244,6 +343,173 @@ fn is_tool_result_type(normalized_type: &str) -> bool {
         || normalized_type.contains("command_result")
         || normalized_type.contains("output")
         || normalized_type.contains("end")
+}
+
+fn dedupe_candidates(candidates: Vec<ParsedCandidate>) -> Vec<ParsedCandidate> {
+    let mut selected_by_stable_key: IndexMap<String, ParsedCandidate> = IndexMap::new();
+    let mut pending = Vec::new();
+
+    for candidate in candidates {
+        if let Some(stable_key) = candidate.stable_key.clone() {
+            match selected_by_stable_key.get_mut(&stable_key) {
+                Some(selected) => {
+                    if should_replace_candidate(selected, &candidate) {
+                        let original_index = selected.original_index;
+                        *selected = candidate;
+                        selected.original_index = original_index;
+                    }
+                }
+                None => {
+                    selected_by_stable_key.insert(stable_key, candidate);
+                }
+            }
+        } else {
+            pending.push(candidate);
+        }
+    }
+
+    let mut combined = pending;
+    combined.extend(selected_by_stable_key.into_values());
+    combined.sort_by_key(|candidate| candidate.original_index);
+
+    suppress_adjacent_duplicates(combined)
+}
+
+fn suppress_adjacent_duplicates(candidates: Vec<ParsedCandidate>) -> Vec<ParsedCandidate> {
+    let mut deduped: Vec<ParsedCandidate> = Vec::new();
+
+    for candidate in candidates {
+        if let Some(previous) = deduped.last_mut() {
+            if should_suppress_adjacent_duplicate(previous, &candidate) {
+                if should_replace_candidate(previous, &candidate) {
+                    let original_index = previous.original_index;
+                    *previous = candidate;
+                    previous.original_index = original_index;
+                }
+                continue;
+            }
+        }
+
+        deduped.push(candidate);
+    }
+
+    deduped
+}
+
+fn should_suppress_adjacent_duplicate(
+    previous: &ParsedCandidate,
+    candidate: &ParsedCandidate,
+) -> bool {
+    if previous.entry.kind != candidate.entry.kind
+        || previous.normalized_text != candidate.normalized_text
+    {
+        return false;
+    }
+
+    if let (Some(previous_key), Some(candidate_key)) = (&previous.stable_key, &candidate.stable_key)
+        && previous_key != candidate_key
+    {
+        return false;
+    }
+
+    if previous.timestamp.is_some()
+        && candidate.timestamp.is_some()
+        && previous.timestamp == candidate.timestamp
+    {
+        return true;
+    }
+
+    is_known_duplicate_source_pair(previous.source, candidate.source)
+}
+
+fn is_known_duplicate_source_pair(left: CandidateSource, right: CandidateSource) -> bool {
+    matches!(
+        (left, right),
+        (
+            CandidateSource::EventUserMessage,
+            CandidateSource::ResponseMessage
+        ) | (
+            CandidateSource::ResponseMessage,
+            CandidateSource::EventUserMessage
+        ) | (
+            CandidateSource::EventAgentMessage,
+            CandidateSource::ResponseMessage
+        ) | (
+            CandidateSource::ResponseMessage,
+            CandidateSource::EventAgentMessage
+        ) | (
+            CandidateSource::EventToolResult,
+            CandidateSource::ResponseToolResult
+        ) | (
+            CandidateSource::ResponseToolResult,
+            CandidateSource::EventToolResult
+        )
+    )
+}
+
+fn should_replace_candidate(current: &ParsedCandidate, candidate: &ParsedCandidate) -> bool {
+    let current_priority = current.source.priority();
+    let candidate_priority = candidate.source.priority();
+
+    candidate_priority > current_priority
+        || (candidate_priority == current_priority
+            && candidate.entry.content.len() > current.entry.content.len())
+}
+
+fn focused_stable_id(payload_type: Option<&str>, payload: &Value) -> Option<String> {
+    match payload_type {
+        Some(payload_type @ ("task_started" | "task_complete")) => {
+            stable_id(payload).map(|stable_id| format!("{payload_type}:{stable_id}"))
+        }
+        _ => stable_id(payload),
+    }
+}
+
+fn stable_id(value: &Value) -> Option<String> {
+    for field in ["id", "call_id", "turn_id", "turnId"] {
+        if let Some(id) = string_field(value, field)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            return Some(id.to_owned());
+        }
+    }
+
+    None
+}
+
+fn timestamp(value: &Value) -> Option<String> {
+    for field in ["timestamp", "time", "created_at", "createdAt"] {
+        if let Some(timestamp) = string_field(value, field)
+            .map(str::trim)
+            .filter(|timestamp| !timestamp.is_empty())
+        {
+            return Some(timestamp.to_owned());
+        }
+    }
+
+    None
+}
+
+fn normalize_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn rendered_kind_key(kind: RenderedEntryKind) -> &'static str {
+    match kind {
+        RenderedEntryKind::Context => "Context",
+        RenderedEntryKind::Task => "Task",
+        RenderedEntryKind::You => "You",
+        RenderedEntryKind::Codex => "Codex",
+        RenderedEntryKind::ToolCall => "ToolCall",
+        RenderedEntryKind::ToolResult => "ToolResult",
+        RenderedEntryKind::System => "System",
+    }
 }
 
 fn extract_exec_command_end(payload: &Value) -> Option<RenderedEntry> {
@@ -1066,6 +1332,159 @@ mod tests {
         assert_eq!(parsed.ignored_lines, 1);
         assert_eq!(parsed.parsed_candidates, 0);
         assert!(parsed.entries.is_empty());
+    }
+
+    #[test]
+    fn duplicate_user_message_across_event_and_response_shapes_is_rendered_once() {
+        let parsed = parse_str(
+            &[
+                r#"{"type":"event_msg","payload":{"type":"user_message","id":"msg_1","message":"Hello user"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"msg_1","role":"user","content":"Hello user"}}"#,
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(parsed.parsed_candidates, 2);
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::You,
+                content: "Hello user".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn duplicate_codex_message_across_event_and_response_shapes_is_rendered_once() {
+        let parsed = parse_str(
+            &[
+                r#"{"type":"event_msg","payload":{"type":"agent_message","message":"Codex reply"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":"Codex reply"}}"#,
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(parsed.parsed_candidates, 2);
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::Codex,
+                content: "Codex reply".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn duplicate_tool_results_with_same_call_id_prefer_response_source() {
+        let parsed = parse_str(
+            &[
+                event_msg_line(
+                    "exec_command_end",
+                    serde_json::json!({
+                        "call_id": "call_1",
+                        "command": "cargo test",
+                        "stdout": "short"
+                    }),
+                ),
+                response_item_line(
+                    "function_call_output",
+                    serde_json::json!({
+                        "call_id": "call_1",
+                        "output": "longer response output"
+                    }),
+                ),
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(parsed.parsed_candidates, 2);
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::ToolResult,
+                content: "longer response output".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn duplicate_entries_with_same_stable_id_prefer_longer_content_at_same_priority() {
+        let parsed = parse_str(
+            &[
+                r#"{"type":"response_item","payload":{"type":"message","id":"msg_2","role":"assistant","content":"short"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"msg_2","role":"assistant","content":"longer assistant response"}}"#,
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(parsed.parsed_candidates, 2);
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::Codex,
+                content: "longer assistant response".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn identical_user_messages_with_different_stable_ids_are_not_collapsed() {
+        let parsed = parse_str(
+            &[
+                r#"{"type":"response_item","payload":{"type":"message","id":"msg_a","role":"user","content":"Repeat me"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"msg_b","role":"user","content":"Repeat me"}}"#,
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(parsed.parsed_candidates, 2);
+        assert_eq!(
+            parsed.entries,
+            vec![
+                RenderedEntry {
+                    kind: RenderedEntryKind::You,
+                    content: "Repeat me".to_owned()
+                },
+                RenderedEntry {
+                    kind: RenderedEntryKind::You,
+                    content: "Repeat me".to_owned()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn adjacent_duplicates_with_matching_timestamps_are_suppressed() {
+        let parsed = parse_str(
+            &[
+                r#"{"role":"assistant","timestamp":"2026-06-18T00:00:00Z","content":"Same text"}"#,
+                r#"{"role":"assistant","timestamp":"2026-06-18T00:00:00Z","content":" same   text "}"#,
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(parsed.parsed_candidates, 2);
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::Codex,
+                content: "same   text".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn identical_fallback_messages_without_documented_duplicate_signal_remain_separate() {
+        let parsed = parse_str(
+            &[
+                r#"{"role":"assistant","content":"Same fallback text"}"#,
+                r#"{"role":"assistant","content":"Same fallback text"}"#,
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(parsed.parsed_candidates, 2);
+        assert_eq!(parsed.entries.len(), 2);
     }
 
     #[test]
