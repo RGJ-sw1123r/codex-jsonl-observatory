@@ -81,6 +81,10 @@ fn increment_observed_event_count(counts: &mut IndexMap<String, usize>, value: &
 
 fn extract_entry(value: &Value) -> Option<RenderedEntry> {
     let top_type = string_field(value, "type")?;
+    if top_type == "session_meta" {
+        return extract_session_meta(value.get("payload").unwrap_or(value));
+    }
+
     let payload = value.get("payload")?;
     let payload_type = string_field(payload, "type");
 
@@ -104,6 +108,14 @@ fn extract_entry(value: &Value) -> Option<RenderedEntry> {
                 })
             }
         }
+        ("event_msg", Some("exec_command_end")) => extract_exec_command_end(payload),
+        ("event_msg", Some("patch_apply_end")) => extract_patch_apply_end(payload),
+        ("event_msg", Some("task_started")) => {
+            Some(extract_task_lifecycle("Task started", payload))
+        }
+        ("event_msg", Some("task_complete")) => {
+            Some(extract_task_lifecycle("Task complete", payload))
+        }
         ("response_item", Some("message")) => extract_response_message(payload),
         ("response_item", Some("function_call")) => extract_tool_call(payload, "Function call"),
         ("response_item", Some("custom_tool_call")) => {
@@ -116,6 +128,111 @@ fn extract_entry(value: &Value) -> Option<RenderedEntry> {
             extract_tool_result(payload, "Custom tool call output")
         }
         _ => None,
+    }
+}
+
+fn extract_exec_command_end(payload: &Value) -> Option<RenderedEntry> {
+    let mut lines = vec!["Exec command finished".to_owned()];
+
+    if let Some(command) = string_field(payload, "command")
+        .or_else(|| string_field(payload, "cmd"))
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+    {
+        lines.push(format!("Command: {command}"));
+    }
+
+    if let Some(status) = string_field(payload, "status")
+        .map(str::trim)
+        .filter(|status| !status.is_empty())
+    {
+        lines.push(format!("Status: {status}"));
+    }
+
+    if let Some(exit_code) = value_field_to_string(payload, "exit_code")
+        .or_else(|| value_field_to_string(payload, "exitCode"))
+    {
+        lines.push(format!("Exit code: {exit_code}"));
+    }
+
+    if let Some(output) = extract_first_text_field(
+        payload,
+        &["aggregated_output", "formatted_output", "stdout", "stderr"],
+    ) {
+        lines.push(output);
+    }
+
+    if lines.len() == 1 {
+        None
+    } else {
+        Some(RenderedEntry {
+            kind: RenderedEntryKind::ToolResult,
+            content: lines.join("\n"),
+        })
+    }
+}
+
+fn extract_patch_apply_end(payload: &Value) -> Option<RenderedEntry> {
+    let status = string_field(payload, "status")?.trim();
+    if status.is_empty() {
+        return None;
+    }
+
+    Some(RenderedEntry {
+        kind: RenderedEntryKind::ToolResult,
+        content: format!("Patch apply status: {status}"),
+    })
+}
+
+fn extract_task_lifecycle(label: &str, payload: &Value) -> RenderedEntry {
+    let mut content = label.to_owned();
+    if let Some(turn_id) = string_field(payload, "turn_id")
+        .or_else(|| string_field(payload, "turnId"))
+        .map(str::trim)
+        .filter(|turn_id| !turn_id.is_empty())
+    {
+        content.push('\n');
+        content.push_str("Turn: ");
+        content.push_str(turn_id);
+    }
+
+    RenderedEntry {
+        kind: RenderedEntryKind::System,
+        content,
+    }
+}
+
+fn extract_session_meta(payload: &Value) -> Option<RenderedEntry> {
+    let mut lines = Vec::new();
+
+    if let Some(id) = string_field(payload, "id")
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        lines.push(format!("Session: {id}"));
+    }
+
+    if let Some(provider) = string_field(payload, "model_provider")
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+    {
+        lines.push(format!("Model provider: {provider}"));
+    }
+
+    if let Some(version) = string_field(payload, "cli_version")
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+    {
+        lines.push(format!("CLI version: {version}"));
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(RenderedEntry {
+            kind: RenderedEntryKind::System,
+            content: lines.join("\n"),
+        })
     }
 }
 
@@ -246,6 +363,16 @@ fn extract_text(value: &Value) -> Option<String> {
     None
 }
 
+fn extract_first_text_field(value: &Value, fields: &[&str]) -> Option<String> {
+    fields.iter().find_map(|field| {
+        value
+            .get(*field)
+            .and_then(text_from_value)
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty())
+    })
+}
+
 fn text_from_value(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
@@ -273,6 +400,18 @@ fn text_from_value(value: &Value) -> Option<String> {
 
             None
         }
+        _ => None,
+    }
+}
+
+fn value_field_to_string(value: &Value, field: &str) -> Option<String> {
+    let value = value.get(field)?;
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_owned())
+        }
+        Value::Number(number) => Some(number.to_string()),
         _ => None,
     }
 }
@@ -317,6 +456,26 @@ mod tests {
                 "type": "agent_message",
                 "message": message
             }
+        })
+        .to_string()
+    }
+
+    fn event_msg_line(payload_type: &str, fields: serde_json::Value) -> String {
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "type".to_owned(),
+            serde_json::Value::String(payload_type.to_owned()),
+        );
+
+        let serde_json::Value::Object(fields) = fields else {
+            panic!("test fields must be a JSON object");
+        };
+
+        payload.extend(fields);
+
+        serde_json::json!({
+            "type": "event_msg",
+            "payload": payload
         })
         .to_string()
     }
@@ -448,6 +607,131 @@ mod tests {
         assert_eq!(parsed.ignored_lines, 1);
         assert_eq!(parsed.parsed_candidates, 0);
         assert!(parsed.entries.is_empty());
+    }
+
+    #[test]
+    fn event_msg_exec_command_end_is_tool_result() {
+        let parsed = parse_str(&event_msg_line(
+            "exec_command_end",
+            serde_json::json!({
+                "command": "cargo test",
+                "status": "completed",
+                "exit_code": 0,
+                "aggregated_output": "test output"
+            }),
+        ));
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::ToolResult,
+                content:
+                    "Exec command finished\nCommand: cargo test\nStatus: completed\nExit code: 0\ntest output"
+                        .to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn event_msg_exec_command_end_uses_first_available_output() {
+        let parsed = parse_str(&event_msg_line(
+            "exec_command_end",
+            serde_json::json!({
+                "cmd": "cargo fmt",
+                "formatted_output": "formatted",
+                "stdout": "stdout",
+                "stderr": "stderr"
+            }),
+        ));
+
+        assert_eq!(parsed.entries[0].kind, RenderedEntryKind::ToolResult);
+        assert_eq!(
+            parsed.entries[0].content,
+            "Exec command finished\nCommand: cargo fmt\nformatted"
+        );
+    }
+
+    #[test]
+    fn event_msg_patch_apply_end_is_tool_result() {
+        let parsed = parse_str(&event_msg_line(
+            "patch_apply_end",
+            serde_json::json!({
+                "status": "success"
+            }),
+        ));
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::ToolResult,
+                content: "Patch apply status: success".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn event_msg_task_started_and_complete_are_system_entries() {
+        let parsed = parse_str(
+            &[
+                event_msg_line("task_started", serde_json::json!({"turn_id": "turn_1"})),
+                event_msg_line("task_complete", serde_json::json!({"turn_id": "turn_1"})),
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(
+            parsed.entries,
+            vec![
+                RenderedEntry {
+                    kind: RenderedEntryKind::System,
+                    content: "Task started\nTurn: turn_1".to_owned()
+                },
+                RenderedEntry {
+                    kind: RenderedEntryKind::System,
+                    content: "Task complete\nTurn: turn_1".to_owned()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn session_meta_is_system_entry() {
+        let parsed = parse_str(
+            r#"{"type":"session_meta","payload":{"id":"session_1","model_provider":"openai","cli_version":"1.2.3"}}"#,
+        );
+
+        assert_eq!(
+            parsed.entries,
+            vec![RenderedEntry {
+                kind: RenderedEntryKind::System,
+                content: "Session: session_1\nModel provider: openai\nCLI version: 1.2.3"
+                    .to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn new_envelopes_preserve_counts_for_ignored_and_observed_lines() {
+        let parsed = parse_str(
+            &[
+                event_msg_line("exec_command_end", serde_json::json!({})),
+                event_msg_line("patch_apply_end", serde_json::json!({"status": ""})),
+                r#"{"type":"session_meta","payload":{}}"#.to_owned(),
+                event_msg_line("task_started", serde_json::json!({})),
+            ]
+            .join("\n"),
+        );
+
+        assert_eq!(parsed.malformed_lines, 0);
+        assert_eq!(parsed.ignored_lines, 3);
+        assert_eq!(parsed.parsed_candidates, 1);
+        assert_eq!(
+            parsed.observed_event_counts["event_msg/exec_command_end"],
+            1
+        );
+        assert_eq!(parsed.observed_event_counts["event_msg/patch_apply_end"], 1);
+        assert_eq!(parsed.observed_event_counts["session_meta"], 1);
+        assert_eq!(parsed.observed_event_counts["event_msg/task_started"], 1);
     }
 
     #[test]
