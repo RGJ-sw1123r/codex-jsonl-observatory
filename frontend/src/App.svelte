@@ -1,12 +1,16 @@
 <script lang="ts">
   import {
+    applyParseResponse,
     beginLoad,
     createInitialLoadWorkflowState,
+    failLoad,
     selectBrowserFile,
     selectPath,
     updateFilter,
     type LoadWorkflowState,
   } from './lib/load-workflow'
+  import { parseSelectedJsonl, selectJsonlPath } from './lib/tauri-bridge'
+  import type { ApiErrorDto } from './lib/parse-contract'
 
   let workflow: LoadWorkflowState = createInitialLoadWorkflowState()
 
@@ -28,8 +32,29 @@
     workflow = selectBrowserFile(workflow, target.files?.[0] ?? null)
   }
 
-  function markLoadBoundary() {
+  async function chooseJsonlPath() {
+    const selectedPath = await selectJsonlPath()
+
+    if (selectedPath !== null) {
+      workflow = selectPath(workflow, selectedPath)
+    }
+  }
+
+  async function loadSelectedJsonl() {
+    const path = workflow.selected_file.path.trim()
+
+    if (path === '') {
+      return
+    }
+
     workflow = beginLoad(workflow)
+
+    try {
+      const response = await parseSelectedJsonl(path, workflow.filter)
+      workflow = applyParseResponse(workflow, response)
+    } catch (error) {
+      workflow = failLoad(workflow, normalizeLoadError(error))
+    }
   }
 
   function handleFilterInput(key: keyof LoadWorkflowState['filter'], event: Event) {
@@ -61,13 +86,36 @@
   function displayedAbsolutePath() {
     return workflow.loaded_file.metadata?.absolute_path ?? (workflow.selected_file.path || 'None')
   }
+
+  function normalizeLoadError(error: unknown): ApiErrorDto {
+    if (isApiError(error)) {
+      return error
+    }
+
+    if (error instanceof Error) {
+      return { code: 'tauri_command_failed', message: error.message }
+    }
+
+    return { code: 'tauri_command_failed', message: String(error) }
+  }
+
+  function isApiError(error: unknown): error is ApiErrorDto {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      'message' in error &&
+      typeof (error as ApiErrorDto).code === 'string' &&
+      typeof (error as ApiErrorDto).message === 'string'
+    )
+  }
 </script>
 
 <main class="control-room">
   <section class="load-panel" aria-labelledby="load-title">
     <div>
       <p class="eyebrow">Codex JSONL Observatory</p>
-      <h1 id="load-title">Display Workflow Scaffold</h1>
+      <h1 id="load-title">Tauri App Shell</h1>
     </div>
 
     <label class="field">
@@ -86,8 +134,11 @@
     </label>
 
     <div class="actions">
-      <button type="button" disabled={workflow.status === 'idle'} onclick={markLoadBoundary}>
-        Mark load boundary
+      <button type="button" class="secondary" onclick={chooseJsonlPath}>
+        Select JSONL
+      </button>
+      <button type="button" disabled={workflow.status === 'idle'} onclick={loadSelectedJsonl}>
+        Parse JSONL
       </button>
       <span class="status" data-status={workflow.status}>{workflow.status}</span>
     </div>
@@ -101,12 +152,12 @@
   {:else if workflow.status === 'selected'}
     <section class="state-banner" aria-live="polite">
       <h2>Ready</h2>
-      <p>A signal record is selected. The transport boundary is intentionally not implemented here.</p>
+      <p>A signal record is selected. Tauri will parse it through the Rust boundary.</p>
     </section>
   {:else if workflow.status === 'loading'}
     <section class="state-banner" aria-live="polite">
       <h2>Loading</h2>
-      <p>Load state is active. Parsed observations will populate this scaffold after a future transport boundary.</p>
+      <p>Load state is active while the Tauri command calls the Rust parse boundary.</p>
     </section>
   {:else if workflow.status === 'error'}
     <section class="state-banner error" aria-live="polite">
