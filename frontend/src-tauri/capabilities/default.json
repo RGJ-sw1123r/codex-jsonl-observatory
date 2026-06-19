@@ -3,5 +3,16 @@
   "identifier": "default",
   "description": "Default desktop permissions for the Observatory app shell.",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://riu-salze-studio.gitbook.io/cosmic-horizon"
+        }
+      ]
+    }
+  ]
 }

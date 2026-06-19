@@ -8,16 +8,24 @@
   }
 
   let { entry, index }: Props = $props()
+  let isExpanded = $state(false)
 
   const label = $derived(renderLabelForKind(entry.kind, entry.label))
 </script>
 
 <li class="render-block" data-family={label.family}>
-  <header class="render-header">
+  <button
+    type="button"
+    class="render-header raw-entry-toggle"
+    aria-expanded={isExpanded}
+    onclick={() => (isExpanded = !isExpanded)}
+  >
     <span class="render-index">{index + 1}</span>
     <strong>{label.label}</strong>
     <span>{label.source_label}</span>
     <code>{entry.kind}</code>
-  </header>
-  <pre>{entry.content || '(empty)'}</pre>
+  </button>
+  {#if isExpanded}
+    <pre>{entry.content || '(empty)'}</pre>
+  {/if}
 </li>

@@ -3,6 +3,7 @@
     applyParseResponse,
     beginLoad,
     createInitialLoadWorkflowState,
+    defaultFilterState,
     failLoad,
     selectPath,
     updateFilter,
@@ -10,10 +11,14 @@
   } from './lib/load-workflow'
   import { parseSelectedJsonl, selectJsonlPath } from './lib/tauri-bridge'
   import RenderedEntry from './lib/rendering/RenderedEntry.svelte'
-  import TranscriptBlock from './lib/rendering/TranscriptBlock.svelte'
-  import type { ApiErrorDto } from './lib/parse-contract'
+  import TerminalTranscript from './lib/rendering/TerminalTranscript.svelte'
+  import type { ApiErrorDto, LoadedFileMetadataDto } from './lib/parse-contract'
 
   let workflow: LoadWorkflowState = createInitialLoadWorkflowState()
+  let copyResumeMessage = ''
+  let rawEntriesPage = 1
+
+  const RAW_ENTRIES_PAGE_SIZE = 50
 
   const filterOptions = [
     ['show_you', 'You'],
@@ -26,6 +31,8 @@
   function handlePathInput(event: Event) {
     const target = event.currentTarget as HTMLInputElement
     workflow = selectPath(workflow, target.value)
+    copyResumeMessage = ''
+    rawEntriesPage = 1
   }
 
   async function chooseJsonlPath() {
@@ -33,33 +40,121 @@
 
     if (selectedPath !== null) {
       workflow = selectPath(workflow, selectedPath)
+      copyResumeMessage = ''
+      rawEntriesPage = 1
+      await loadSelectedJsonl(selectedPath)
     }
   }
 
-  async function loadSelectedJsonl() {
-    const path = workflow.selected_file.path.trim()
+  async function loadSelectedJsonl(pathOverride?: string) {
+    const path = (pathOverride ?? workflow.selected_file.path).trim()
 
     if (path === '') {
       return
     }
 
     workflow = beginLoad(workflow)
+    rawEntriesPage = 1
 
     try {
-      const response = await parseSelectedJsonl(path, workflow.filter)
+      const response = await parseSelectedJsonl(path, defaultFilterState)
       workflow = applyParseResponse(workflow, response)
+      copyResumeMessage = ''
     } catch (error) {
       workflow = failLoad(workflow, normalizeLoadError(error))
+      copyResumeMessage = ''
     }
   }
 
   function handleFilterInput(key: keyof LoadWorkflowState['filter'], event: Event) {
     const target = event.currentTarget as HTMLInputElement
     workflow = updateFilter(workflow, key, target.checked)
+    rawEntriesPage = 1
+  }
+
+  function rawEntriesPageCount() {
+    return Math.max(1, Math.ceil(workflow.observations.entries.length / RAW_ENTRIES_PAGE_SIZE))
+  }
+
+  function rawEntriesPageStartIndex() {
+    return (rawEntriesPage - 1) * RAW_ENTRIES_PAGE_SIZE
+  }
+
+  function paginatedRawEntries() {
+    const start = rawEntriesPageStartIndex()
+    return workflow.observations.entries.slice(start, start + RAW_ENTRIES_PAGE_SIZE)
+  }
+
+  function rawEntriesShowingStart() {
+    return workflow.observations.entries.length === 0 ? 0 : rawEntriesPageStartIndex() + 1
+  }
+
+  function rawEntriesShowingEnd() {
+    return Math.min(
+      rawEntriesPageStartIndex() + RAW_ENTRIES_PAGE_SIZE,
+      workflow.observations.entries.length,
+    )
+  }
+
+  function showPreviousRawEntriesPage() {
+    rawEntriesPage = Math.max(1, rawEntriesPage - 1)
+  }
+
+  function showNextRawEntriesPage() {
+    rawEntriesPage = Math.min(rawEntriesPageCount(), rawEntriesPage + 1)
   }
 
   function displayedAbsolutePath() {
-    return workflow.loaded_file.metadata?.absolute_path ?? (workflow.selected_file.path || 'None')
+    const path = workflow.loaded_file.metadata?.absolute_path ?? workflow.selected_file.path
+    return path === '' ? 'None' : displayFriendlyPath(path)
+  }
+
+  function displayedMetadata(): LoadedFileMetadataDto | null {
+    const metadata = workflow.loaded_file.metadata
+
+    if (metadata === null) {
+      return null
+    }
+
+    return {
+      ...metadata,
+      absolute_path: displayFriendlyPath(metadata.absolute_path),
+    }
+  }
+
+  function displayFriendlyPath(path: string) {
+    return path.replace(/^\\\\\?\\UNC\\/i, '\\\\').replace(/^\\\\\?\\/, '')
+  }
+
+  function transcriptKey() {
+    const filter = workflow.filter
+    return [
+      workflow.loaded_file.metadata?.absolute_path ?? 'unloaded',
+      filter.show_you,
+      filter.show_codex,
+      filter.show_tool_call,
+      filter.show_tool_result,
+      filter.show_meta,
+    ].join('|')
+  }
+
+  async function copyResumeCommand() {
+    const command = workflow.loaded_file.metadata?.resume_command
+
+    if (command == null || command.trim() === '') {
+      return
+    }
+
+    try {
+      if (navigator.clipboard == null) {
+        throw new Error('Clipboard access is unavailable.')
+      }
+
+      await navigator.clipboard.writeText(command)
+      copyResumeMessage = 'Copied.'
+    } catch {
+      copyResumeMessage = 'Copy failed.'
+    }
   }
 
   function hasSelectedPath() {
@@ -91,146 +186,79 @@
 </script>
 
 <main class="control-room">
-  <section class="load-panel" aria-labelledby="load-title">
-    <div>
-      <p class="eyebrow">Codex JSONL Observatory</p>
-      <h1 id="load-title">Tauri App Shell</h1>
-    </div>
-
-    <div class="selection-primary">
-      <button type="button" onclick={chooseJsonlPath}>
-        Select JSONL
-      </button>
-      <p>Tauri file dialog is the primary selection flow.</p>
-    </div>
-
-    <label class="field">
-      <span>Manual path fallback</span>
-      <input
-        type="text"
-        value={workflow.selected_file.path}
-        placeholder="Paste a local JSONL path"
-        oninput={handlePathInput}
-      />
-    </label>
-
-    <div class="actions">
-      <button type="button" disabled={!hasSelectedPath()} onclick={loadSelectedJsonl}>
-        Parse JSONL
-      </button>
-      <span class="status" data-status={workflow.status}>{workflow.status}</span>
-    </div>
-  </section>
-
-  <section class="selected-path" aria-label="Selected signal record">
-    <h2>Selected Path</h2>
-    <p>{workflow.selected_file.path || 'No JSONL path selected.'}</p>
-  </section>
-
-  {#if workflow.status === 'idle'}
-    <section class="state-banner" aria-live="polite">
-      <h2>Idle</h2>
-      <p>No signal record selected.</p>
-    </section>
-  {:else if workflow.status === 'selected'}
-    <section class="state-banner" aria-live="polite">
-      <h2>Ready</h2>
-      <p>A signal record is selected. Tauri will parse it through the Rust boundary.</p>
-    </section>
-  {:else if workflow.status === 'loading'}
-    <section class="state-banner" aria-live="polite">
-      <h2>Loading</h2>
-      <p>Load state is active while the Tauri command calls the Rust parse boundary.</p>
-    </section>
-  {:else if workflow.status === 'error'}
-    <section class="state-banner error" aria-live="polite">
-      <h2>Error</h2>
-      <p>{workflow.error?.message ?? 'No error payload is available.'}</p>
-    </section>
-  {:else if workflow.status === 'loaded' && workflow.observations.entries.length === 0}
-    <section class="state-banner" aria-live="polite">
-      <h2>Loaded Empty</h2>
-      <p>The selected signal record loaded without visible parsed entries.</p>
-    </section>
-  {:else if workflow.status === 'loaded'}
-    <section class="state-banner" aria-live="polite">
-      <h2>Loaded</h2>
-      <p>Parsed entries and transcript blocks are available for display scaffolding.</p>
-    </section>
-  {/if}
-
-  <section class="summary-grid" aria-label="Loaded file summary">
-    <article class="metadata-panel">
-      <div class="panel-heading">
-        <h2>Loaded File</h2>
-        <button
-          type="button"
-          class="secondary"
-          disabled={workflow.loaded_file.metadata?.resume_command == null}
-        >
-          Copy Resume Command
-        </button>
+  <header class="app-header" aria-labelledby="app-title">
+    <div class="toolbar">
+      <div class="product-heading">
+        <p class="eyebrow">Local transcript viewer</p>
+        <h1 id="app-title">Codex JSONL Observatory</h1>
       </div>
 
-      <dl>
+      <div class="toolbar-actions">
+        <button type="button" onclick={chooseJsonlPath}>Select JSONL</button>
+
+        <label class="manual-path-field">
+          <span>Manual path (use Refresh to load)</span>
+          <input
+            type="text"
+            value={workflow.selected_file.path}
+            placeholder="Paste a local JSONL path"
+            oninput={handlePathInput}
+          />
+        </label>
+
+        <button
+          type="button"
+          class="refresh-button"
+          disabled={!hasSelectedPath()}
+          onclick={() => loadSelectedJsonl()}
+        >
+          Refresh
+        </button>
+        <span class="status" data-status={workflow.status}>{workflow.status}</span>
+      </div>
+    </div>
+
+    <section class="selection-panel" aria-label="Current selection">
+      <div class="selected-path-row">
+        <span>Selected path</span>
+        <strong
+          title={workflow.selected_file.path
+            ? displayFriendlyPath(workflow.selected_file.path)
+            : 'No JSONL path selected.'}
+        >
+          {workflow.selected_file.path
+            ? displayFriendlyPath(workflow.selected_file.path)
+            : 'No JSONL path selected.'}
+        </strong>
+      </div>
+
+      <dl class="selection-metadata">
         <div>
-          <dt>File name</dt>
+          <dt>File</dt>
           <dd>{workflow.loaded_file.metadata?.file_name ?? 'Not loaded'}</dd>
         </div>
         <div>
-          <dt>Absolute path</dt>
-          <dd>{displayedAbsolutePath()}</dd>
-        </div>
-        <div>
-          <dt>Session</dt>
-          <dd>{workflow.loaded_file.metadata?.session_id ?? 'None'}</dd>
-        </div>
-        <div>
-          <dt>Resume command</dt>
-          <dd>{workflow.loaded_file.metadata?.resume_command ?? 'Unavailable'}</dd>
+          <dt>Session ID</dt>
+          <dd>{workflow.loaded_file.metadata?.session_id ?? 'Not detected'}</dd>
         </div>
       </dl>
-    </article>
 
-    <article>
-      <h2>Selected File</h2>
-      <dl>
-        <div>
-          <dt>Path</dt>
-          <dd>{workflow.selected_file.path || 'None'}</dd>
-        </div>
-      </dl>
-    </article>
-  </section>
+      <div class="resume-row">
+        <span>Resume command</span>
+        <code>{workflow.loaded_file.metadata?.resume_command ?? 'Not available'}</code>
+        <button
+          type="button"
+          class="secondary copy-resume-button"
+          disabled={workflow.loaded_file.metadata?.resume_command == null}
+          onclick={copyResumeCommand}
+        >
+          Copy Resume Command
+        </button>
+        <span class="copy-status" aria-live="polite">{copyResumeMessage}</span>
+      </div>
+    </section>
 
-  <section class="summary-grid" aria-label="Observation summary">
-    <article>
-      <h2>Counters</h2>
-      <dl class="metric-grid">
-        <div>
-          <dt>Parsed</dt>
-          <dd>{workflow.loaded_file.counters.parsed_candidates}</dd>
-        </div>
-        <div>
-          <dt>Total</dt>
-          <dd>{workflow.loaded_file.counters.total_entries}</dd>
-        </div>
-        <div>
-          <dt>Visible</dt>
-          <dd>{workflow.loaded_file.counters.visible_entries}</dd>
-        </div>
-        <div>
-          <dt>Ignored</dt>
-          <dd>{workflow.loaded_file.counters.ignored_lines}</dd>
-        </div>
-        <div>
-          <dt>Malformed</dt>
-          <dd>{workflow.loaded_file.counters.malformed_lines}</dd>
-        </div>
-      </dl>
-    </article>
-
-    <article>
+    <section class="filter-bar" aria-label="Transcript filters">
       <h2>Filters</h2>
       <div class="filter-list">
         {#each filterOptions as [key, label]}
@@ -244,58 +272,106 @@
           </label>
         {/each}
       </div>
-    </article>
+    </section>
 
-    <article>
-      <h2>Observed Events</h2>
-      {#if workflow.loaded_file.observed_event_counts.length === 0}
-        <p class="empty-text">No observed event counts loaded.</p>
-      {:else}
-        <ol class="event-list">
-          {#each workflow.loaded_file.observed_event_counts as eventCount}
-            <li>
-              <span>{eventCount.event}</span>
-              <strong>{eventCount.count}</strong>
-            </li>
-          {/each}
-        </ol>
-      {/if}
-    </article>
-  </section>
+    {#if workflow.status === 'loading'}
+      <p class="status-message" aria-live="polite">Loading the selected JSONL file…</p>
+    {:else if workflow.status === 'error'}
+      <p class="status-message error" aria-live="assertive">
+        {workflow.error?.message ?? 'The selected JSONL file could not be loaded.'}
+      </p>
+    {/if}
+  </header>
 
-  <section class="display-grid" aria-label="Parsed display scaffold">
-    <article>
-      <div class="panel-heading">
-        <h2>Entries</h2>
-        <span class="count">{workflow.observations.entries.length}</span>
-      </div>
-
-      {#if workflow.observations.entries.length === 0}
-        <p class="empty-text">No parsed entries to display.</p>
-      {:else}
-        <ol class="render-list">
-          {#each workflow.observations.entries as entry, index}
-            <RenderedEntry {entry} {index} />
-          {/each}
-        </ol>
-      {/if}
-    </article>
-
-    <article>
-      <div class="panel-heading">
-        <h2>Transcript Blocks</h2>
-        <span class="count">{workflow.observations.transcript_blocks.length}</span>
-      </div>
-
-      {#if workflow.observations.transcript_blocks.length === 0}
-        <p class="empty-text">No transcript blocks to display.</p>
-      {:else}
-        <ol class="render-list">
-          {#each workflow.observations.transcript_blocks as block, index}
-            <TranscriptBlock {block} {index} />
-          {/each}
-        </ol>
-      {/if}
+  <section class="terminal-section" aria-label="Terminal transcript view">
+    <article class="terminal-panel">
+      {#key transcriptKey()}
+        <TerminalTranscript
+          isLoaded={workflow.status === 'loaded'}
+          showIdentityNote={!hasSelectedPath()}
+          metadata={displayedMetadata()}
+          counters={workflow.loaded_file.counters}
+          observedEventCounts={workflow.loaded_file.observed_event_counts}
+          blocks={workflow.observations.transcript_blocks}
+        />
+      {/key}
     </article>
   </section>
+
+  <details class="secondary-section">
+    <summary>
+      <span>Raw Entries &amp; Diagnostics</span>
+      <span class="count">{workflow.observations.entries.length}</span>
+    </summary>
+
+    <div class="secondary-content">
+      <section aria-labelledby="raw-entries-title">
+        <div class="raw-entries-heading">
+          <h2 id="raw-entries-title">Raw Entries</h2>
+          {#if workflow.observations.entries.length > 0}
+            <div class="raw-entries-pagination" aria-label="Raw Entries pagination">
+              <span>Page {rawEntriesPage} / {rawEntriesPageCount()}</span>
+              <span>
+                Showing {rawEntriesShowingStart()}–{rawEntriesShowingEnd()} of
+                {workflow.observations.entries.length}
+              </span>
+              <button
+                type="button"
+                class="secondary pagination-button"
+                disabled={rawEntriesPage === 1}
+                onclick={showPreviousRawEntriesPage}
+              >
+                Previous
+              </button>
+              <button
+                type="button"
+                class="secondary pagination-button"
+                disabled={rawEntriesPage === rawEntriesPageCount()}
+                onclick={showNextRawEntriesPage}
+              >
+                Next
+              </button>
+            </div>
+          {/if}
+        </div>
+        {#if workflow.observations.entries.length === 0}
+          <p class="empty-text">No parsed entries to display.</p>
+        {:else}
+          <ol class="render-list">
+            {#each paginatedRawEntries() as entry, index}
+              <RenderedEntry {entry} index={rawEntriesPageStartIndex() + index} />
+            {/each}
+          </ol>
+        {/if}
+      </section>
+
+      <aside class="diagnostics" aria-label="Parse diagnostics">
+        <h2>Resolved Path</h2>
+        <p class="diagnostic-path" title={displayedAbsolutePath()}>{displayedAbsolutePath()}</p>
+
+        <h2 class="diagnostic-heading">Counters</h2>
+        <dl class="diagnostic-metrics">
+          <div><dt>Parsed</dt><dd>{workflow.loaded_file.counters.parsed_candidates}</dd></div>
+          <div><dt>Total</dt><dd>{workflow.loaded_file.counters.total_entries}</dd></div>
+          <div><dt>Visible</dt><dd>{workflow.loaded_file.counters.visible_entries}</dd></div>
+          <div><dt>Ignored</dt><dd>{workflow.loaded_file.counters.ignored_lines}</dd></div>
+          <div><dt>Malformed</dt><dd>{workflow.loaded_file.counters.malformed_lines}</dd></div>
+        </dl>
+
+        <h2 class="diagnostic-heading">Observed Events</h2>
+        {#if workflow.loaded_file.observed_event_counts.length === 0}
+          <p class="empty-text">No observed event counts loaded.</p>
+        {:else}
+          <ol class="event-list">
+            {#each workflow.loaded_file.observed_event_counts as eventCount}
+              <li>
+                <span>{eventCount.event}</span>
+                <strong>{eventCount.count}</strong>
+              </li>
+            {/each}
+          </ol>
+        {/if}
+      </aside>
+    </div>
+  </details>
 </main>

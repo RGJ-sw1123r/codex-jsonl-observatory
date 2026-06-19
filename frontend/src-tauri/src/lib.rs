@@ -80,6 +80,7 @@ fn resolve_jsonl_initial_directory(remembered_directory: Option<String>) -> Stri
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             parse_selected_jsonl,
             resolve_jsonl_initial_directory
