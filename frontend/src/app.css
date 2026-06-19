@@ -101,7 +101,7 @@ article {
 
 .load-panel {
   display: grid;
-  grid-template-columns: 1.2fr 1fr 1fr auto;
+  grid-template-columns: 1.2fr 0.8fr 1.4fr auto;
   gap: 18px;
   align-items: end;
   padding: 24px;
@@ -116,7 +116,8 @@ article {
   text-transform: uppercase;
 }
 
-.field {
+.field,
+.selection-primary {
   display: grid;
   gap: 7px;
   color: var(--muted);
@@ -144,6 +145,13 @@ article {
 
 .actions {
   justify-content: flex-end;
+}
+
+.selection-primary p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .status,
@@ -174,14 +182,17 @@ article {
   background: var(--accent-weak);
 }
 
-.state-banner {
+.state-banner,
+.selected-path {
   margin-top: 18px;
   padding: 18px 20px;
 }
 
-.state-banner p {
+.state-banner p,
+.selected-path p {
   margin-top: 4px;
   color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .state-banner.error {

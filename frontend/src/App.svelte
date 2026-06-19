@@ -4,7 +4,6 @@
     beginLoad,
     createInitialLoadWorkflowState,
     failLoad,
-    selectBrowserFile,
     selectPath,
     updateFilter,
     type LoadWorkflowState,
@@ -25,11 +24,6 @@
   function handlePathInput(event: Event) {
     const target = event.currentTarget as HTMLInputElement
     workflow = selectPath(workflow, target.value)
-  }
-
-  function handleFileInput(event: Event) {
-    const target = event.currentTarget as HTMLInputElement
-    workflow = selectBrowserFile(workflow, target.files?.[0] ?? null)
   }
 
   async function chooseJsonlPath() {
@@ -62,22 +56,6 @@
     workflow = updateFilter(workflow, key, target.checked)
   }
 
-  function fileSizeLabel(size: number) {
-    if (size === 0) {
-      return '0 B'
-    }
-
-    if (size < 1024) {
-      return `${size} B`
-    }
-
-    if (size < 1024 * 1024) {
-      return `${(size / 1024).toFixed(1)} KB`
-    }
-
-    return `${(size / (1024 * 1024)).toFixed(1)} MB`
-  }
-
   function previewContent(content: string) {
     const compact = content.replace(/\s+/g, ' ').trim()
     return compact.length > 180 ? `${compact.slice(0, 180)}...` : compact
@@ -85,6 +63,10 @@
 
   function displayedAbsolutePath() {
     return workflow.loaded_file.metadata?.absolute_path ?? (workflow.selected_file.path || 'None')
+  }
+
+  function hasSelectedPath() {
+    return workflow.selected_file.path.trim() !== ''
   }
 
   function normalizeLoadError(error: unknown): ApiErrorDto {
@@ -118,30 +100,34 @@
       <h1 id="load-title">Tauri App Shell</h1>
     </div>
 
+    <div class="selection-primary">
+      <button type="button" onclick={chooseJsonlPath}>
+        Select JSONL
+      </button>
+      <p>Tauri file dialog is the primary selection flow.</p>
+    </div>
+
     <label class="field">
-      <span>Signal record path</span>
+      <span>Manual path fallback</span>
       <input
         type="text"
         value={workflow.selected_file.path}
-        placeholder="Select or enter a local JSONL path"
+        placeholder="Paste a local JSONL path"
         oninput={handlePathInput}
       />
     </label>
 
-    <label class="field">
-      <span>Selected file</span>
-      <input type="file" accept=".jsonl,application/jsonl,application/json" onchange={handleFileInput} />
-    </label>
-
     <div class="actions">
-      <button type="button" class="secondary" onclick={chooseJsonlPath}>
-        Select JSONL
-      </button>
-      <button type="button" disabled={workflow.status === 'idle'} onclick={loadSelectedJsonl}>
+      <button type="button" disabled={!hasSelectedPath()} onclick={loadSelectedJsonl}>
         Parse JSONL
       </button>
       <span class="status" data-status={workflow.status}>{workflow.status}</span>
     </div>
+  </section>
+
+  <section class="selected-path" aria-label="Selected signal record">
+    <h2>Selected Path</h2>
+    <p>{workflow.selected_file.path || 'No JSONL path selected.'}</p>
   </section>
 
   {#if workflow.status === 'idle'}
@@ -213,16 +199,8 @@
       <h2>Selected File</h2>
       <dl>
         <div>
-          <dt>Path input</dt>
+          <dt>Path</dt>
           <dd>{workflow.selected_file.path || 'None'}</dd>
-        </div>
-        <div>
-          <dt>Browser file</dt>
-          <dd>{workflow.selected_file.browser_file?.name ?? 'None'}</dd>
-        </div>
-        <div>
-          <dt>Size</dt>
-          <dd>{fileSizeLabel(workflow.selected_file.browser_file?.size ?? 0)}</dd>
         </div>
       </dl>
     </article>

@@ -11,16 +11,8 @@ import type {
 
 export type LoadStatus = 'idle' | 'selected' | 'loading' | 'loaded' | 'error'
 
-export interface SelectedBrowserFile {
-  name: string
-  size: number
-  type: string
-  last_modified: number
-}
-
 export interface SelectedFileState {
   path: string
-  browser_file: SelectedBrowserFile | null
 }
 
 export interface LoadedFileState {
@@ -64,7 +56,6 @@ export function createInitialLoadWorkflowState(): LoadWorkflowState {
     status: 'idle',
     selected_file: {
       path: '',
-      browser_file: null,
     },
     loaded_file: {
       metadata: null,
@@ -85,27 +76,7 @@ export function selectPath(state: LoadWorkflowState, path: string): LoadWorkflow
     ...clearLoadedResult(state),
     status: path.trim() === '' ? 'idle' : 'selected',
     selected_file: {
-      ...state.selected_file,
       path,
-    },
-  }
-}
-
-export function selectBrowserFile(state: LoadWorkflowState, file: File | null): LoadWorkflowState {
-  return {
-    ...clearLoadedResult(state),
-    status: file === null && state.selected_file.path.trim() === '' ? 'idle' : 'selected',
-    selected_file: {
-      ...state.selected_file,
-      browser_file:
-        file === null
-          ? null
-          : {
-              name: file.name,
-              size: file.size,
-              type: file.type,
-              last_modified: file.lastModified,
-            },
     },
   }
 }
