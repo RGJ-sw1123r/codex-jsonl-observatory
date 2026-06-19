@@ -133,6 +133,19 @@ pub struct ApiErrorDto {
 
 pub type ApiResult<T> = Result<T, ErrorResponseDto>;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseBoundaryRequest {
+    pub path: String,
+    pub filter: Option<FilterDto>,
+}
+
+pub fn parse_for_transport(request: ParseBoundaryRequest) -> ApiResult<ParseResponseDto> {
+    parse_selected_file(ParseRequestDto {
+        path: request.path,
+        filter: request.filter.unwrap_or_default(),
+    })
+}
+
 pub fn parse_selected_file(request: ParseRequestDto) -> ApiResult<ParseResponseDto> {
     let path = PathBuf::from(&request.path);
     let source = LoadedFileMetadataDto::from_path(&path).map_err(ErrorResponseDto::from_io)?;
@@ -143,6 +156,14 @@ pub fn parse_selected_file(request: ParseRequestDto) -> ApiResult<ParseResponseD
         source,
         parsed_chat_log: ParsedChatLogDto::from_domain(&parsed, &filter),
     })
+}
+
+pub fn project_parsed_chat_log(
+    parsed: &ParsedChatLog,
+    filter: Option<FilterDto>,
+) -> ParsedChatLogDto {
+    let filter = filter.unwrap_or_default();
+    ParsedChatLogDto::from_domain(parsed, &ChatEntryFilter::from(filter))
 }
 
 impl LoadedFileMetadataDto {
@@ -617,5 +638,95 @@ mod tests {
 
         assert_eq!(json["error"]["code"], "parse_file_failed");
         assert_eq!(json["error"]["message"], "permission denied");
+    }
+
+    #[test]
+    fn transport_boundary_defaults_to_all_filters() {
+        let dto = project_parsed_chat_log(&parsed_log(), None);
+
+        assert_eq!(dto.counters.total_entries, 5);
+        assert_eq!(dto.counters.visible_entries, 5);
+        assert_eq!(
+            dto.entries
+                .iter()
+                .map(|entry| entry.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                EntryKindDto::You,
+                EntryKindDto::Codex,
+                EntryKindDto::ToolCall,
+                EntryKindDto::Task,
+                EntryKindDto::System,
+            ]
+        );
+    }
+
+    #[test]
+    fn transport_boundary_projects_explicit_filter_without_reparse() {
+        let dto = project_parsed_chat_log(
+            &parsed_log(),
+            Some(FilterDto {
+                show_you: false,
+                show_codex: true,
+                show_tool_call: false,
+                show_tool_result: true,
+                show_meta: true,
+            }),
+        );
+
+        assert_eq!(dto.counters.parsed_candidates, 5);
+        assert_eq!(dto.counters.ignored_lines, 3);
+        assert_eq!(dto.counters.malformed_lines, 1);
+        assert_eq!(dto.counters.total_entries, 5);
+        assert_eq!(dto.counters.visible_entries, 3);
+        assert_eq!(
+            dto.entries
+                .iter()
+                .map(|entry| entry.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                EntryKindDto::Codex,
+                EntryKindDto::Task,
+                EntryKindDto::System
+            ]
+        );
+    }
+
+    #[test]
+    fn transport_boundary_request_defaults_filter_before_parse() {
+        let request = ParseBoundaryRequest {
+            path: "E:\\sessions\\codex.jsonl".to_owned(),
+            filter: None,
+        };
+
+        let selected = ParseRequestDto {
+            path: request.path.clone(),
+            filter: request.filter.unwrap_or_default(),
+        };
+
+        assert_eq!(selected.filter, FilterDto::default());
+        assert_eq!(selected.filter, FilterDto::from(ChatEntryFilter::all()));
+    }
+
+    #[test]
+    fn transport_boundary_json_shape_stays_dto_compatible() {
+        let response = ParseResponseDto {
+            source: LoadedFileMetadataDto {
+                file_name: Some("codex.jsonl".to_owned()),
+                absolute_path: "E:\\sessions\\codex.jsonl".to_owned(),
+                session_id: None,
+                resume_command: None,
+            },
+            parsed_chat_log: project_parsed_chat_log(&parsed_log(), None),
+        };
+
+        let json = response.to_json();
+
+        assert_eq!(json["source"]["file_name"], "codex.jsonl");
+        assert!(json["source"]["session_id"].is_null());
+        assert!(json["source"]["resume_command"].is_null());
+        assert_eq!(json["parsed_chat_log"]["counters"]["total_entries"], 5);
+        assert_eq!(json["parsed_chat_log"]["counters"]["visible_entries"], 5);
+        assert_eq!(json["parsed_chat_log"]["entries"][3]["kind"], "task");
     }
 }
