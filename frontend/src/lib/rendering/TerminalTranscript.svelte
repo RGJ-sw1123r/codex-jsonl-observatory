@@ -3,24 +3,23 @@
   import type {
     LoadedFileMetadataDto,
     ObservedEventCountDto,
-    ParseCountersDto,
     TranscriptBlockDto,
   } from '../parse-contract'
   import { renderLabelForKind } from './render-labels'
+  import type { TranscriptThemeName } from './transcript-themes'
 
   const COSMIC_HORIZON_URL = 'https://riu-salze-studio.gitbook.io/cosmic-horizon'
 
   interface Props {
+    theme: TranscriptThemeName
     isLoaded: boolean
     showIdentityNote: boolean
     metadata: LoadedFileMetadataDto | null
-    counters: ParseCountersDto
     observedEventCounts: ObservedEventCountDto[]
     blocks: TranscriptBlockDto[]
   }
 
-  let { isLoaded, showIdentityNote, metadata, counters, observedEventCounts, blocks }: Props =
-    $props()
+  let { theme, isLoaded, showIdentityNote, metadata, observedEventCounts, blocks }: Props = $props()
   let collapsedBlocks = $state<Record<number, boolean>>({})
 
   const separator = '========================================================================'
@@ -61,7 +60,7 @@
       <div class="terminal-blank" aria-hidden="true"></div>
       <div>Select a local JSONL session to begin.</div>
     {/if}
-    <div class="terminal-metadata">Default theme: Terminal Style</div>
+    <div class="terminal-metadata">Current theme: {theme}</div>
   {:else}
     <div class="terminal-metadata">File: {metadata.file_name ?? 'Not detected'}</div>
     <div class="terminal-metadata">Path: {metadata.absolute_path}</div>
@@ -110,10 +109,5 @@
     {/if}
 
     <div class="terminal-separator">{separator}</div>
-    <div class="terminal-blank" aria-hidden="true"></div>
-    <div class="terminal-metadata">Parsed candidates: {counters.parsed_candidates}</div>
-    <div class="terminal-metadata">Visible entries: {counters.visible_entries}</div>
-    <div class="terminal-metadata">Ignored lines: {counters.ignored_lines}</div>
-    <div class="terminal-metadata">Malformed lines: {counters.malformed_lines}</div>
   {/if}
 </div>

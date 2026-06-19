@@ -11,12 +11,20 @@
   } from './lib/load-workflow'
   import { parseSelectedJsonl, selectJsonlPath } from './lib/tauri-bridge'
   import RenderedEntry from './lib/rendering/RenderedEntry.svelte'
+  import ChatTranscript from './lib/rendering/ChatTranscript.svelte'
+  import MarkdownTranscript from './lib/rendering/MarkdownTranscript.svelte'
   import TerminalTranscript from './lib/rendering/TerminalTranscript.svelte'
+  import {
+    renderPathForTheme,
+    transcriptThemes,
+    type TranscriptThemeName,
+  } from './lib/rendering/transcript-themes'
   import type { ApiErrorDto, LoadedFileMetadataDto } from './lib/parse-contract'
 
   let workflow: LoadWorkflowState = createInitialLoadWorkflowState()
   let copyResumeMessage = ''
   let rawEntriesPage = 1
+  let selectedTheme: TranscriptThemeName = 'Terminal Style'
 
   const RAW_ENTRIES_PAGE_SIZE = 50
 
@@ -70,6 +78,11 @@
     const target = event.currentTarget as HTMLInputElement
     workflow = updateFilter(workflow, key, target.checked)
     rawEntriesPage = 1
+  }
+
+  function handleThemeInput(event: Event) {
+    const target = event.currentTarget as HTMLSelectElement
+    selectedTheme = target.value as TranscriptThemeName
   }
 
   function rawEntriesPageCount() {
@@ -135,6 +148,7 @@
       filter.show_tool_call,
       filter.show_tool_result,
       filter.show_meta,
+      selectedTheme,
     ].join('|')
   }
 
@@ -272,6 +286,14 @@
           </label>
         {/each}
       </div>
+      <label class="theme-selector">
+        <span>Theme</span>
+        <select value={selectedTheme} onchange={handleThemeInput}>
+          {#each transcriptThemes as theme}
+            <option value={theme}>{theme}</option>
+          {/each}
+        </select>
+      </label>
     </section>
 
     {#if workflow.status === 'loading'}
@@ -283,17 +305,38 @@
     {/if}
   </header>
 
-  <section class="terminal-section" aria-label="Terminal transcript view">
-    <article class="terminal-panel">
+  <section class="terminal-section" aria-label="Transcript view">
+    <article
+      class:terminal-panel={renderPathForTheme(selectedTheme) === 'terminal'}
+      class:theme-panel={renderPathForTheme(selectedTheme) !== 'terminal'}
+    >
       {#key transcriptKey()}
-        <TerminalTranscript
-          isLoaded={workflow.status === 'loaded'}
-          showIdentityNote={!hasSelectedPath()}
-          metadata={displayedMetadata()}
-          counters={workflow.loaded_file.counters}
-          observedEventCounts={workflow.loaded_file.observed_event_counts}
-          blocks={workflow.observations.transcript_blocks}
-        />
+        {#if renderPathForTheme(selectedTheme) === 'terminal'}
+          <TerminalTranscript
+            theme={selectedTheme}
+            isLoaded={workflow.status === 'loaded'}
+            showIdentityNote={workflow.status !== 'loaded'}
+            metadata={displayedMetadata()}
+            observedEventCounts={workflow.loaded_file.observed_event_counts}
+            blocks={workflow.observations.transcript_blocks}
+          />
+        {:else if renderPathForTheme(selectedTheme) === 'markdown'}
+          <MarkdownTranscript
+            theme={selectedTheme}
+            isLoaded={workflow.status === 'loaded'}
+            metadata={displayedMetadata()}
+            observedEventCounts={workflow.loaded_file.observed_event_counts}
+            blocks={workflow.observations.transcript_blocks}
+          />
+        {:else}
+          <ChatTranscript
+            theme={selectedTheme as 'DM Style' | 'DM Style (Dark)'}
+            isLoaded={workflow.status === 'loaded'}
+            metadata={displayedMetadata()}
+            observedEventCounts={workflow.loaded_file.observed_event_counts}
+            blocks={workflow.observations.transcript_blocks}
+          />
+        {/if}
       {/key}
     </article>
   </section>
