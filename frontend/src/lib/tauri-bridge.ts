@@ -2,8 +2,14 @@ import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import type { ApiErrorDto, ErrorResponseDto, FilterDto, ParseResponseDto } from './parse-contract'
 
+let lastSelectedDirectory: string | null = null
+
 export async function selectJsonlPath(): Promise<string | null> {
+  const defaultPath = await invoke<string>('resolve_jsonl_initial_directory', {
+    rememberedDirectory: lastSelectedDirectory,
+  })
   const selected = await open({
+    defaultPath,
     multiple: false,
     directory: false,
     filters: [
@@ -14,7 +20,12 @@ export async function selectJsonlPath(): Promise<string | null> {
     ],
   })
 
-  return typeof selected === 'string' ? selected : null
+  if (typeof selected !== 'string') {
+    return null
+  }
+
+  lastSelectedDirectory = parentDirectory(selected)
+  return selected
 }
 
 export async function parseSelectedJsonl(
@@ -58,4 +69,15 @@ function isErrorResponse(error: unknown): error is ErrorResponseDto {
     typeof candidate.error.code === 'string' &&
     typeof candidate.error.message === 'string'
   )
+}
+
+function parentDirectory(path: string): string | null {
+  const normalized = path.replace(/[/\\]+$/, '')
+  const lastSeparator = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'))
+
+  if (lastSeparator <= 0) {
+    return null
+  }
+
+  return normalized.slice(0, lastSeparator)
 }
