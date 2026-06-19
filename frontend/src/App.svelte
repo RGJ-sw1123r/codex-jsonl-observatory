@@ -9,6 +9,8 @@
     type LoadWorkflowState,
   } from './lib/load-workflow'
   import { parseSelectedJsonl, selectJsonlPath } from './lib/tauri-bridge'
+  import RenderedEntry from './lib/rendering/RenderedEntry.svelte'
+  import TranscriptBlock from './lib/rendering/TranscriptBlock.svelte'
   import type { ApiErrorDto } from './lib/parse-contract'
 
   let workflow: LoadWorkflowState = createInitialLoadWorkflowState()
@@ -54,11 +56,6 @@
   function handleFilterInput(key: keyof LoadWorkflowState['filter'], event: Event) {
     const target = event.currentTarget as HTMLInputElement
     workflow = updateFilter(workflow, key, target.checked)
-  }
-
-  function previewContent(content: string) {
-    const compact = content.replace(/\s+/g, ' ').trim()
-    return compact.length > 180 ? `${compact.slice(0, 180)}...` : compact
   }
 
   function displayedAbsolutePath() {
@@ -276,16 +273,9 @@
       {#if workflow.observations.entries.length === 0}
         <p class="empty-text">No parsed entries to display.</p>
       {:else}
-        <ol class="scaffold-list">
+        <ol class="render-list">
           {#each workflow.observations.entries as entry, index}
-            <li>
-              <div class="item-heading">
-                <span>{index + 1}</span>
-                <strong>{entry.label}</strong>
-                <code>{entry.kind}</code>
-              </div>
-              <p>{previewContent(entry.content)}</p>
-            </li>
+            <RenderedEntry {entry} {index} />
           {/each}
         </ol>
       {/if}
@@ -300,16 +290,9 @@
       {#if workflow.observations.transcript_blocks.length === 0}
         <p class="empty-text">No transcript blocks to display.</p>
       {:else}
-        <ol class="scaffold-list">
+        <ol class="render-list">
           {#each workflow.observations.transcript_blocks as block, index}
-            <li>
-              <div class="item-heading">
-                <span>{index + 1}</span>
-                <strong>{block.title}</strong>
-                <code>{block.entry_type}</code>
-              </div>
-              <p>{previewContent(block.content)}</p>
-            </li>
+            <TranscriptBlock {block} {index} />
           {/each}
         </ol>
       {/if}
