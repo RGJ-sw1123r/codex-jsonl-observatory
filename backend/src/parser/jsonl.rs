@@ -102,7 +102,12 @@ fn parse_lossy_lines(input: &str) -> ParsedChatLog {
     }
 
     let parsed_candidates = candidates.len();
-    let entries = dedupe_candidates(candidates)
+    let candidates = dedupe_candidates(candidates);
+    let entry_timestamps = candidates
+        .iter()
+        .map(|candidate| candidate.timestamp.clone())
+        .collect();
+    let entries = candidates
         .into_iter()
         .map(|candidate| candidate.entry)
         .collect();
@@ -110,6 +115,7 @@ fn parse_lossy_lines(input: &str) -> ParsedChatLog {
     ParsedChatLog {
         parsed_candidates,
         entries,
+        entry_timestamps,
         ignored_lines,
         malformed_lines,
         observed_event_counts,

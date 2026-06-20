@@ -463,6 +463,7 @@ mod tests {
                     content: "session".to_owned(),
                 },
             ],
+            entry_timestamps: vec![None; 5],
             parsed_candidates: 5,
             ignored_lines: 3,
             malformed_lines: 1,

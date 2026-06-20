@@ -260,7 +260,7 @@ code {
 
 .resume-row {
   display: grid;
-  grid-template-columns: 92px minmax(0, 1fr) auto minmax(58px, auto);
+  grid-template-columns: 92px minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
   margin-top: 7px;
@@ -283,14 +283,29 @@ code {
   overflow-wrap: anywhere;
 }
 
-.copy-resume-button {
-  padding: 5px 9px;
-  font-size: 12px;
+.resume-actions {
+  display: grid;
+  grid-template-columns: repeat(2, 168px);
+  gap: 8px;
+  width: fit-content;
+  justify-self: end;
 }
 
-.copy-status {
+.resume-action-button {
+  width: 168px;
+  padding: 5px 14px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.action-status {
+  grid-column: 2 / -1;
+  justify-self: end;
+  min-height: 18px;
   color: var(--muted);
   font-size: 12px;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .filter-bar {
@@ -1064,6 +1079,12 @@ dd {
   .resume-row > span:first-child,
   .resume-row code {
     grid-column: 1 / -1;
+  }
+
+  .resume-actions,
+  .action-status {
+    grid-column: 1 / -1;
+    justify-self: end;
   }
 
   .selected-path-row {

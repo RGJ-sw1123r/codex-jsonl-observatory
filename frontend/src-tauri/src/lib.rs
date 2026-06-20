@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use backend::api::{self, ParseBoundaryRequest};
+use backend::export::{self, ExportWorklogRequest, ExportWorklogResult};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[derive(Clone, Debug, Deserialize)]
 struct TauriFilterDto {
@@ -33,6 +34,33 @@ fn parse_selected_jsonl(path: String, filter: TauriFilterDto) -> Result<Value, V
     })
     .map(|response| response.to_json())
     .map_err(|error| error.to_json())
+}
+
+#[tauri::command]
+fn export_worklog(source_path: String, parent_directory: String) -> Result<Value, Value> {
+    let response = export::export_worklog(ExportWorklogRequest {
+        source_path: PathBuf::from(source_path),
+        parent_directory: PathBuf::from(parent_directory),
+    })
+    .map_err(|error| error.to_json())?;
+    let folder_open_result = tauri_plugin_opener::open_path(&response.bundle_path, None::<&str>)
+        .map_err(|error| error.to_string());
+
+    Ok(export_worklog_response(response, folder_open_result))
+}
+
+fn export_worklog_response(
+    response: ExportWorklogResult,
+    folder_open_result: Result<(), String>,
+) -> Value {
+    let mut value = response.to_json();
+    let (folder_opened, folder_open_error) = match folder_open_result {
+        Ok(()) => (true, Value::Null),
+        Err(error) => (false, json!(error)),
+    };
+    value["folder_opened"] = json!(folder_opened);
+    value["folder_open_error"] = folder_open_error;
+    value
 }
 
 #[tauri::command]
@@ -82,9 +110,53 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            export_worklog,
             parse_selected_jsonl,
             resolve_jsonl_initial_directory
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn export_result(refreshed: bool) -> ExportWorklogResult {
+        ExportWorklogResult {
+            bundle_path: "E:\\exports\\codex-worklog\\2026-06-19\\161859_session-019ee0ad"
+                .to_owned(),
+            generated_files: vec!["000_index.md".to_owned(), "manifest.json".to_owned()],
+            refreshed,
+        }
+    }
+
+    #[test]
+    fn export_response_reports_folder_open_success() {
+        let response = export_worklog_response(export_result(false), Ok(()));
+
+        assert_eq!(response["status"], "exported");
+        assert_eq!(response["folder_opened"], true);
+        assert!(response["folder_open_error"].is_null());
+    }
+
+    #[test]
+    fn export_response_preserves_success_when_folder_open_fails() {
+        let response =
+            export_worklog_response(export_result(false), Err("Explorer unavailable".to_owned()));
+
+        assert_eq!(response["status"], "exported");
+        assert_eq!(response["folder_opened"], false);
+        assert_eq!(response["folder_open_error"], "Explorer unavailable");
+    }
+
+    #[test]
+    fn refreshed_export_preserves_success_when_folder_open_fails() {
+        let response =
+            export_worklog_response(export_result(true), Err("Explorer unavailable".to_owned()));
+
+        assert_eq!(response["status"], "exported");
+        assert_eq!(response["refreshed"], true);
+        assert_eq!(response["folder_opened"], false);
+    }
 }

@@ -9,7 +9,12 @@
     updateFilter,
     type LoadWorkflowState,
   } from './lib/load-workflow'
-  import { parseSelectedJsonl, selectJsonlPath } from './lib/tauri-bridge'
+  import {
+    exportWorklog,
+    parseSelectedJsonl,
+    selectJsonlPath,
+    selectWorklogParentDirectory,
+  } from './lib/tauri-bridge'
   import RenderedEntry from './lib/rendering/RenderedEntry.svelte'
   import ChatTranscript from './lib/rendering/ChatTranscript.svelte'
   import MarkdownTranscript from './lib/rendering/MarkdownTranscript.svelte'
@@ -22,7 +27,8 @@
   import type { ApiErrorDto, LoadedFileMetadataDto } from './lib/parse-contract'
 
   let workflow: LoadWorkflowState = createInitialLoadWorkflowState()
-  let copyResumeMessage = ''
+  let actionStatusMessage = ''
+  let isExportingWorklog = false
   let rawEntriesPage = 1
   let selectedTheme: TranscriptThemeName = 'Terminal Style'
 
@@ -39,7 +45,7 @@
   function handlePathInput(event: Event) {
     const target = event.currentTarget as HTMLInputElement
     workflow = selectPath(workflow, target.value)
-    copyResumeMessage = ''
+    actionStatusMessage = ''
     rawEntriesPage = 1
   }
 
@@ -48,7 +54,7 @@
 
     if (selectedPath !== null) {
       workflow = selectPath(workflow, selectedPath)
-      copyResumeMessage = ''
+      actionStatusMessage = ''
       rawEntriesPage = 1
       await loadSelectedJsonl(selectedPath)
     }
@@ -67,10 +73,10 @@
     try {
       const response = await parseSelectedJsonl(path, defaultFilterState)
       workflow = applyParseResponse(workflow, response)
-      copyResumeMessage = ''
+      actionStatusMessage = ''
     } catch (error) {
       workflow = failLoad(workflow, normalizeLoadError(error))
-      copyResumeMessage = ''
+      actionStatusMessage = ''
     }
   }
 
@@ -165,9 +171,47 @@
       }
 
       await navigator.clipboard.writeText(command)
-      copyResumeMessage = 'Copied.'
+      actionStatusMessage = 'Copied.'
     } catch {
-      copyResumeMessage = 'Copy failed.'
+      actionStatusMessage = 'Copy failed.'
+    }
+  }
+
+  async function handleExportWorklog() {
+    const metadata = workflow.loaded_file.metadata
+
+    if (workflow.status !== 'loaded' || metadata === null || isExportingWorklog) {
+      return
+    }
+
+    isExportingWorklog = true
+
+    try {
+      const parentDirectory = await selectWorklogParentDirectory(metadata.absolute_path)
+      if (parentDirectory === null) {
+        actionStatusMessage = 'Export cancelled.'
+        return
+      }
+
+      actionStatusMessage = 'Exporting worklog…'
+      const result = await exportWorklog(metadata.absolute_path, parentDirectory)
+      if (!result.folder_opened) {
+        actionStatusMessage = result.refreshed
+          ? 'Worklog refreshed, but folder could not be opened.'
+          : 'Worklog exported, but folder could not be opened.'
+      } else {
+        actionStatusMessage = result.refreshed
+          ? `Worklog refreshed: ${displayFriendlyPath(result.bundle_path)}`
+          : `Worklog exported: ${displayFriendlyPath(result.bundle_path)}`
+      }
+    } catch (error) {
+      const apiError = normalizeLoadError(error)
+      actionStatusMessage =
+        apiError.code === 'target_not_safe_to_overwrite'
+          ? 'Target not safe to overwrite.'
+          : `Worklog export failed: ${apiError.message}`
+    } finally {
+      isExportingWorklog = false
     }
   }
 
@@ -260,15 +304,25 @@
       <div class="resume-row">
         <span>Resume command</span>
         <code>{workflow.loaded_file.metadata?.resume_command ?? 'Not available'}</code>
-        <button
-          type="button"
-          class="secondary copy-resume-button"
-          disabled={workflow.loaded_file.metadata?.resume_command == null}
-          onclick={copyResumeCommand}
-        >
-          Copy Resume Command
-        </button>
-        <span class="copy-status" aria-live="polite">{copyResumeMessage}</span>
+        <div class="resume-actions">
+          <button
+            type="button"
+            class="secondary resume-action-button"
+            disabled={workflow.loaded_file.metadata?.resume_command == null}
+            onclick={copyResumeCommand}
+          >
+            Copy Resume Command
+          </button>
+          <button
+            type="button"
+            class="secondary resume-action-button"
+            disabled={workflow.status !== 'loaded' || isExportingWorklog}
+            onclick={handleExportWorklog}
+          >
+            Export Worklog
+          </button>
+        </div>
+        <span class="action-status" aria-live="polite">{actionStatusMessage}</span>
       </div>
     </section>
 

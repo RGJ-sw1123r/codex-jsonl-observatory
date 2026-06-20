@@ -5,6 +5,7 @@ use super::{ChatEntryFilter, RenderedEntry, RenderedEntryKind, TranscriptBlock};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedChatLog {
     pub entries: Vec<RenderedEntry>,
+    pub entry_timestamps: Vec<Option<String>>,
     pub parsed_candidates: usize,
     pub ignored_lines: usize,
     pub malformed_lines: usize,
@@ -15,6 +16,7 @@ impl ParsedChatLog {
     pub fn empty() -> Self {
         Self {
             entries: Vec::new(),
+            entry_timestamps: Vec::new(),
             parsed_candidates: 0,
             ignored_lines: 0,
             malformed_lines: 0,
@@ -29,6 +31,13 @@ impl ParsedChatLog {
                 .iter()
                 .filter(|entry| filter_allows_kind(filter, entry.kind))
                 .cloned()
+                .collect(),
+            entry_timestamps: self
+                .entries
+                .iter()
+                .zip(&self.entry_timestamps)
+                .filter(|(entry, _)| filter_allows_kind(filter, entry.kind))
+                .map(|(_, timestamp)| timestamp.clone())
                 .collect(),
             parsed_candidates: self.parsed_candidates,
             ignored_lines: self.ignored_lines,
@@ -82,6 +91,7 @@ mod tests {
                 entry(RenderedEntryKind::ToolResult, "tool result"),
                 entry(RenderedEntryKind::System, "system"),
             ],
+            entry_timestamps: vec![None; 7],
             parsed_candidates: 9,
             ignored_lines: 3,
             malformed_lines: 2,
@@ -211,6 +221,7 @@ mod tests {
                 entry(RenderedEntryKind::You, "hello"),
                 entry(RenderedEntryKind::Codex, "hi"),
             ],
+            entry_timestamps: vec![None; 2],
             parsed_candidates: 2,
             ignored_lines: 0,
             malformed_lines: 0,

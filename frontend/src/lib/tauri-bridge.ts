@@ -1,8 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import type { ApiErrorDto, ErrorResponseDto, FilterDto, ParseResponseDto } from './parse-contract'
+import type { ExportWorklogResponse } from './worklog-contract'
 
 let lastSelectedDirectory: string | null = null
+let lastWorklogParentDirectory: string | null = null
 
 export async function selectJsonlPath(): Promise<string | null> {
   const defaultPath = await invoke<string>('resolve_jsonl_initial_directory', {
@@ -34,6 +36,36 @@ export async function parseSelectedJsonl(
 ): Promise<ParseResponseDto> {
   try {
     return await invoke<ParseResponseDto>('parse_selected_jsonl', { path, filter })
+  } catch (error) {
+    throw normalizeApiError(error)
+  }
+}
+
+export async function selectWorklogParentDirectory(sourcePath: string): Promise<string | null> {
+  const selected = await open({
+    defaultPath: lastWorklogParentDirectory ?? parentDirectory(sourcePath) ?? undefined,
+    multiple: false,
+    directory: true,
+    title: 'Select Worklog Export Parent',
+  })
+
+  if (typeof selected !== 'string') {
+    return null
+  }
+
+  lastWorklogParentDirectory = selected
+  return selected
+}
+
+export async function exportWorklog(
+  sourcePath: string,
+  parentDirectory: string,
+): Promise<ExportWorklogResponse> {
+  try {
+    return await invoke<ExportWorklogResponse>('export_worklog', {
+      sourcePath,
+      parentDirectory,
+    })
   } catch (error) {
     throw normalizeApiError(error)
   }
