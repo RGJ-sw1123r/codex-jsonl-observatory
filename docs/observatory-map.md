@@ -11,7 +11,7 @@ Codex JSONL Observatory
 Purpose:
 
 ```text
-A local-first Rust + Svelte web viewer for Codex CLI JSONL session logs.
+A local-first Rust + Svelte web viewer for Codex session JSONL logs from sources including Codex CLI and the Codex Windows app.
 ```
 
 This project is not only a viewer.
@@ -38,7 +38,7 @@ Codex JSONL Observatory rebuilds the same idea as a Rust + Svelte local web obse
 Use these meanings consistently:
 
 ```text
-Signal Records      = raw Codex CLI JSONL files
+Signal Records      = raw Codex session JSONL files
 Signals             = raw JSONL events
 Observations        = parsed/rendered entries
 Observatory Core    = Rust backend
