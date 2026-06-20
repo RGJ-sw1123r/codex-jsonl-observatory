@@ -11,7 +11,7 @@ Open a session to read its parsed transcript, inspect raw entries and parser dia
 - Focus the transcript with role filters for You, Codex, tool calls, tool results, and metadata.
 - Inspect paginated raw entries, the resolved source path, parser counters, and observed event counts under **Raw Entries & Diagnostics**.
 - Copy the detected `codex resume <session-id>` command with **Copy Resume Command**.
-- Open the related Cosmic Horizon Archive with **Visit Cosmic Horizon**.
+- Open the related [Cosmic Horizon Archive](https://riu-salze-studio.gitbook.io/cosmic-horizon) with **Visit Cosmic Horizon**.
 - Export the complete session as a versionable worklog bundle with **Export Worklog**.
 
 ## Reading a session
