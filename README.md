@@ -1,8 +1,14 @@
 # Codex JSONL Observatory
 
-Codex JSONL Observatory is a local desktop tool for reading Codex CLI JSONL sessions and exporting them as versionable worklog bundles.
+Codex JSONL Observatory is a local desktop tool for reading Codex CLI JSONL sessions and exporting versionable worklog bundles. Built with Rust, Svelte, and Tauri, it processes session data locally.
 
-Open a session to read its parsed transcript, inspect raw entries and parser diagnostics, or turn the complete session into structured files that can live with a project workspace, documentation, internal archive, or repository.
+Use it for transcript reading, inspecting raw entries and parser diagnostics, or turning a complete session into structured files that can live with a project workspace, documentation, internal archive, or repository.
+
+## Lineage and release status
+
+Codex JSONL Observatory is the second-generation successor to [Codex Chat Viewer](https://github.com/RGJ-sw1123r/codex-chat-viewer), the earlier tool in this product line. It continues the same problem space of reading Codex CLI JSONL sessions while rebuilding the workflow as a Rust/Svelte/Tauri local desktop app.
+
+`v0.1.0` is the first public Windows portable release of Codex JSONL Observatory. It is a functional release covering the current product workflow described in [Features](#features), [Reading a session](#reading-a-session), and [Export Worklog](#export-worklog).
 
 ## Features
 
