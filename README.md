@@ -10,6 +10,8 @@ Codex JSONL Observatory is the second-generation successor to [Codex Chat Viewer
 
 `v0.1.0` is the first public Windows portable release of Codex JSONL Observatory. It is a functional release covering the current product workflow described in [Features](#features), [Reading a session](#reading-a-session), and [Export Worklog](#export-worklog).
 
+Just download the Windows portable zip, unzip it, and run the app. No server, cloud account, or developer environment is required.
+
 ## Features
 
 - Open a Codex session JSONL file from Codex CLI or the Codex Windows app with the file picker or a local path.
